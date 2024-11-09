@@ -48,11 +48,11 @@ desc = "L-Shaped Test"
 urllib.request.urlretrieve(ln, "src/Datasets/L-Shaped/linearDarcy_test.mat", reporthook=show_progress)
 
 # #### Elastic ############################################################################################################################################
-ln = "https://drive.usercontent.google.com/download?id=1Am7TLUFEWQ6rWviJB-V0NDJoOdhkbUPn&export=download&authuser=0&confirm=t&uuid=d22af85e-e7f2-4186-84a6-0b7714aa60df&at=APZUnTUIfZKE27uCb0gWN0VxOWb8:1723137813630"
+ln = "https://drive.usercontent.google.com/download?id=1Fm3iyp2EZvGi2LefNhh_pfZCfprqsG17&export=download&authuser=0&confirm=t&uuid=55d3a708-7ef7-4a88-81ec-cffa6580a96a&at=AENtkXa6-LqLjaF6fL2-xgzVKBvT:1731181737429"
 desc = "Elastic Train"
 urllib.request.urlretrieve(ln, "src/Datasets/Elastic/linearElasticity_train.mat", reporthook=show_progress)
 
-ln = "https://drive.usercontent.google.com/download?id=1nXnZm-2MKpnH22CJ7bRmLTqA0WC9cxG8&export=download&authuser=0&confirm=t&uuid=2924183e-b5da-4085-8531-75f77ca81333&at=APZUnTUeqXTPa2Jpseg7X44P4iQP:1723137855875"
+ln = "https://drive.usercontent.google.com/download?id=1Fm3iyp2EZvGi2LefNhh_pfZCfprqsG17&export=download&authuser=0&confirm=t&uuid=55d3a708-7ef7-4a88-81ec-cffa6580a96a&at=AENtkXa6-LqLjaF6fL2-xgzVKBvT:1731181737429"
 desc = "Elastic Test"
 urllib.request.urlretrieve(ln, "src/Datasets/Elastic/linearElasticity_test.mat", reporthook=show_progress)
 
