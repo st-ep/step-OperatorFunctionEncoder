@@ -246,72 +246,76 @@ def main():
 
     ##############   Evaluate    ###################
     with torch.no_grad():
-        # Add offset variable here
-        minus_worst = -9  # Offset from worst case sample
-        
-        # First find the worst case
+
         hardest_example_xs, hardest_example_ys, hardest_xs, hardest_ys, hardest_info = None, None, None, None, None
         b2b_loss = -1000000
-        hardest_index = -1
 
-        # Find worst case index
         for search_step in trange(1000):
+            # plot transformation for all model types
             example_xs, example_ys, xs, ys, info = testing_combined_dataset.sample(device, plot_only=False)
-            
+
+            # get output space predictions
             if type(combined_dataset.src_dataset) == HeatSrcDataset:
                 rep = example_ys[:, 0, :]
             else:
                 rep, _ = b2b_model["src"].compute_representation(example_xs, example_ys, method=args.train_method)
+
 
             if transformation_type == "linear":
                 rep = rep @ b2b_model["A"].T
             else:
                 rep = b2b_model["A"](rep)
             b2b_y_hats = b2b_model["tgt"].predict(xs, rep)
-            
+
+            # compute the loss for each function
             losses = ((b2b_y_hats - ys)**2).mean(dim=(1,2))
+
+            # get the hardest example
             max_index = torch.argmax(losses)
-            
             if losses[max_index] > b2b_loss:
+                hardest_example_xs = example_xs[max_index:max_index+1]
+                hardest_example_ys = example_ys[max_index:max_index+1]
+                hardest_xs = xs[max_index:max_index+1]
+                hardest_ys = ys[max_index:max_index+1]
+                hardest_info = {key: value[max_index:max_index+1] for key, value in info.items()}
                 b2b_loss = losses[max_index]
-                hardest_index = info['function_indicies'][max_index].item()
 
-        # Calculate offset index
-        offset_index = hardest_index + minus_worst
-        print(f"\nWorst case index: {hardest_index}")
-        print(f"Using offset sample index: {offset_index}")
+        # After the search loop ends, add these lines:
+        if 'function_indicies' in hardest_info:
+            worst_sample_number = hardest_info['function_indicies'][0].item()
+            
+            # Compute DeepONet loss on the worst sample
+            deeponet_y_hats = deeponet_model.forward(hardest_example_xs, hardest_example_ys, hardest_xs)
+            deeponet_loss = ((deeponet_y_hats - hardest_ys)**2).mean().item()
+            
+            print(f"\nFinal worst case - Sample number: {worst_sample_number}")
+            print(f"B2B Loss: {b2b_loss:.6f}")
+            print(f"DeepONet Loss: {deeponet_loss:.6f}")
 
-        # Get the offset sample
-        found_offset = False
-        while not found_offset:
-            example_xs, example_ys, xs, ys, info = testing_combined_dataset.sample(device, plot_only=False)
-            if 'function_indicies' in info and offset_index in info['function_indicies']:
-                idx = (info['function_indicies'] == offset_index).nonzero(as_tuple=True)[0][0]
-                example_xs = example_xs[idx:idx+1]
-                example_ys = example_ys[idx:idx+1]
-                xs = xs[idx:idx+1]
-                ys = ys[idx:idx+1]
-                info = {key: value[idx:idx+1] for key, value in info.items()}
-                found_offset = True
 
-        # Now use these offset samples for predictions
+        # use hardest data
+        example_xs, example_ys, xs, ys, info = hardest_example_xs, hardest_example_ys, hardest_xs, hardest_ys, hardest_info
+
         if args.dataset_type == "Heat":
             function_indicies = info["function_indicies"]
             all_xs = testing_combined_dataset.tgt_dataset.xs[function_indicies]
             all_ys = testing_combined_dataset.tgt_dataset.ys[function_indicies]
+
+            # get subset we want to plot        
             xs = all_xs[:, 49::99, :]
             ys = all_ys[:, 49::99, :]
             grid = example_xs
-            grid_outs = example_ys
+            grid_outs =  example_ys
         else:
             grid = example_xs
             grid_outs = example_ys
 
-        # Compute predictions using the offset sample
+        # Compute Predictions
         if dataset_type != "Heat":
             b2b_example_y_hats = b2b_model["src"].predict_from_examples(example_xs, example_ys, grid, method=args.train_method)
         else:
             b2b_example_y_hats = None
+        deeponet_example_y_hats = None
 
         if type(combined_dataset.src_dataset) == HeatSrcDataset:
             rep = example_ys[:, 0, :]
@@ -322,11 +326,10 @@ def main():
             rep = rep @ b2b_model["A"].T
         else:
             rep = b2b_model["A"](rep)
-            
         b2b_y_hats = b2b_model["tgt"].predict(xs, rep)
         deeponet_y_hats = deeponet_model.forward(example_xs, example_ys, xs)
 
-        # Save predictions
+        # Prepare predictions data
         predictions = {
             "b2b_predictions": b2b_y_hats.cpu().tolist(),
             "deeponet_predictions": deeponet_y_hats.cpu().tolist(),
@@ -337,20 +340,15 @@ def main():
                 "xs": xs.cpu().tolist(),
                 "ys": ys.cpu().tolist(),
             },
-            "additional_info": {k: v.cpu().tolist() for k, v in info.items()},
-            "indices_info": {
-                "worst_case_index": hardest_index,
-                "offset_index": offset_index,
-                "offset_amount": minus_worst
-            }
+            "additional_info": {k: v.cpu().tolist() for k, v in info.items()}
         }
 
         # Define a directory to save predictions
-        predictions_dir = "predictions_output_101"
+        predictions_dir = "predictions_output"
         os.makedirs(predictions_dir, exist_ok=True)
 
         # Save to a JSON file
-        prediction_file = os.path.join(predictions_dir, f"predictions_seed_101.json")
+        prediction_file = os.path.join(predictions_dir, f"predictions_seed_{args.seed}.json")
         try:
             with open(prediction_file, "w") as f:
                 json.dump(predictions, f, indent=4)

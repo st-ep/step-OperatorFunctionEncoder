@@ -33,6 +33,7 @@ from src.Datasets.ElasticPlateDataset import ElasticPlateBoudaryForceDataset, El
 from src.Datasets.OperatorDataset import CombinedDataset
 
 import json
+import numpy as np
 
 plt.rcParams.update({'font.size': 12})
 plt.rc('text', usetex=False)  # Disable LaTeX rendering
@@ -75,6 +76,66 @@ def get_dataset(dataset_type:str, test:bool, model_type:str, n_sensors:int, devi
     combined_dataset.sample(device)
 
     return src_dataset, tgt_dataset, combined_dataset
+
+def plot_predictions(predictions, dataset_type):
+    """Plot the predictions and groundtruth data."""
+    print("Starting plotting function...")
+    
+    # Extract data and print shapes for debugging
+    b2b_preds = torch.tensor(predictions["b2b_predictions"])
+    deeponet_preds = torch.tensor(predictions["deeponet_predictions"])
+    groundtruth = torch.tensor(predictions["groundtruth"])
+    xs = torch.tensor(predictions["input_data"]["xs"])
+    
+    print(f"Shapes:")
+    print(f"b2b_preds: {b2b_preds.shape}")
+    print(f"deeponet_preds: {deeponet_preds.shape}")
+    print(f"groundtruth: {groundtruth.shape}")
+    print(f"xs: {xs.shape}")
+    
+    # Let's also print some sample values to check the data
+    print("\nSample values at first few points:")
+    print(f"xs[0,:5]: {xs[0,:5]}")
+    print(f"groundtruth[0,:5]: {groundtruth[0,:5]}")
+    print(f"b2b_preds[0,:5]: {b2b_preds[0,:5]}")
+    print(f"deeponet_preds[0,:5]: {deeponet_preds[0,:5]}")
+    
+    # Create figure
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    
+    if dataset_type == "LShaped":
+        print("Plotting LShaped dataset...")
+        # Basic quiver plot without any modifications
+        ax[0].quiver(xs[0,:,0].cpu(), xs[0,:,1].cpu(), 
+                    groundtruth[0,:,0].cpu(), groundtruth[0,:,1].cpu())
+        ax[1].quiver(xs[0,:,0].cpu(), xs[0,:,1].cpu(), 
+                    b2b_preds[0,:,0].cpu(), b2b_preds[0,:,1].cpu())
+        ax[2].quiver(xs[0,:,0].cpu(), xs[0,:,1].cpu(), 
+                    deeponet_preds[0,:,0].cpu(), deeponet_preds[0,:,1].cpu())
+    
+    # Set titles and labels
+    ax[0].set_title('Ground Truth')
+    ax[1].set_title('B2B Prediction')
+    ax[2].set_title('DeepONet Prediction')
+    
+    for a in ax:
+        a.set_xlabel('x')
+        a.set_ylabel('y')
+        a.set_aspect('equal')
+        a.grid(True)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    plot_dir = "prediction_plots"
+    os.makedirs(plot_dir, exist_ok=True)
+    save_path = os.path.join(plot_dir, f"predictions_{dataset_type}.png")
+    print(f"Saving plot to: {save_path}")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    # Show plot instead of closing it
+    plt.show()
+    print("Plotting completed!")
 
 def main():
     # parse args
@@ -357,6 +418,16 @@ def main():
             print(f"Predictions saved to {prediction_file}")
         except Exception as e:
             print(f"Failed to save predictions: {e}")
+
+        # After saving predictions, add:
+        try:
+            print("\nStarting plotting process...")
+            plot_predictions(predictions, args.dataset_type)
+            print("Plot saved successfully!")
+        except Exception as e:
+            print(f"Error during plotting: {e}")
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
