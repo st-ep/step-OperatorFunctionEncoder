@@ -29,7 +29,7 @@ from src.Datasets.QuadraticSinDataset import QuadraticDataset, SinDataset, plot_
 from src.Datasets.DerivativeDataset import CubicDerivativeDataset, CubicDataset, plot_source_cubic, plot_target_cubic_derivative, plot_transformation_derivative
 from src.Datasets.IntegralDataset import QuadraticIntegralDataset, plot_target_quadratic_integral, plot_transformation_integral
 from src.Datasets.MountainCarPoliciesDataset import MountainCarPoliciesDataset, MountainCarEpisodesDataset, plot_source_mountain_car, plot_target_mountain_car, plot_transformation_mountain_car
-from src.Datasets.ElasticPlateDataset import ElasticPlateBoudaryForceDataset, ElasticPlateDisplacementDataset,plot_target_boundary, plot_source_boundary_force, plot_transformation_elastic
+from src.Datasets.ElasticDataError import ElasticPlateBoudaryForceDataset, ElasticPlateDisplacementDataset,plot_target_boundary, plot_source_boundary_force, plot_transformation_elastic
 from src.Datasets.OperatorDataset import CombinedDataset
 
 
@@ -272,11 +272,140 @@ with torch.no_grad():
             b2b_loss = losses[max_index]
             hardest_index = search_step  # Store the search step where we found the hardest example
 
-    print(f"\nHardest example function index: {hardest_info['function_indicies'].item()}")  # Print the actual function index
+    print(f"\nHardest example function index: {hardest_info['function_indicies'].item()}")
     print(f"Maximum loss value: {b2b_loss:.6f}")
+
+    # Get ground truth displacements
+    hardest_index = hardest_info['function_indicies'].item()
+    info_hardest = {'function_indicies': torch.tensor([hardest_index], device=device)}
+    info_offset1 = {'function_indicies': torch.tensor([hardest_index - 50], device=device)}
+    info_offset2 = {'function_indicies': torch.tensor([hardest_index - 100], device=device)}
+
+    # Sample inputs and get ground truth outputs for all cases
+    xs_hardest = testing_combined_dataset.tgt_dataset.sample_inputs(info_hardest, None)
+    xs_offset1 = testing_combined_dataset.tgt_dataset.sample_inputs(info_offset1, None)
+    xs_offset2 = testing_combined_dataset.tgt_dataset.sample_inputs(info_offset2, None)
+    
+    ys_hardest = testing_combined_dataset.tgt_dataset.compute_outputs(info_hardest, xs_hardest)
+    ys_offset1 = testing_combined_dataset.tgt_dataset.compute_outputs(info_offset1, xs_offset1)
+    ys_offset2 = testing_combined_dataset.tgt_dataset.compute_outputs(info_offset2, xs_offset2)
+
+    # Get corresponding source inputs and outputs
+    example_xs_hardest = testing_combined_dataset.src_dataset.sample_inputs(info_hardest, None)
+    example_xs_offset1 = testing_combined_dataset.src_dataset.sample_inputs(info_offset1, None)
+    example_xs_offset2 = testing_combined_dataset.src_dataset.sample_inputs(info_offset2, None)
+    
+    example_ys_hardest = testing_combined_dataset.src_dataset.compute_outputs(info_hardest, example_xs_hardest)
+    example_ys_offset1 = testing_combined_dataset.src_dataset.compute_outputs(info_offset1, example_xs_offset1)
+    example_ys_offset2 = testing_combined_dataset.src_dataset.compute_outputs(info_offset2, example_xs_offset2)
+
+    # Get matrix model predictions
+    if type(combined_dataset.src_dataset) == HeatSrcDataset:
+        rep_hardest = example_ys_hardest[:, 0, :]
+        rep_offset1 = example_ys_offset1[:, 0, :]
+        rep_offset2 = example_ys_offset2[:, 0, :]
+    else:
+        rep_hardest, _ = b2b_model["src"].compute_representation(example_xs_hardest, example_ys_hardest, method=args.train_method)
+        rep_offset1, _ = b2b_model["src"].compute_representation(example_xs_offset1, example_ys_offset1, method=args.train_method)
+        rep_offset2, _ = b2b_model["src"].compute_representation(example_xs_offset2, example_ys_offset2, method=args.train_method)
+
+    if transformation_type == "linear":
+        rep_hardest = rep_hardest @ b2b_model["A"].T
+        rep_offset1 = rep_offset1 @ b2b_model["A"].T
+        rep_offset2 = rep_offset2 @ b2b_model["A"].T
+    else:
+        rep_hardest = b2b_model["A"](rep_hardest)
+        rep_offset1 = b2b_model["A"](rep_offset1)
+        rep_offset2 = b2b_model["A"](rep_offset2)
+
+    b2b_y_hardest = b2b_model["tgt"].predict(xs_hardest, rep_hardest)
+    b2b_y_offset1 = b2b_model["tgt"].predict(xs_offset1, rep_offset1)
+    b2b_y_offset2 = b2b_model["tgt"].predict(xs_offset2, rep_offset2)
+
+    # Get DeepONet predictions
+    deeponet_y_hardest = deeponet_model.forward(example_xs_hardest, example_ys_hardest, xs_hardest)
+    deeponet_y_offset1 = deeponet_model.forward(example_xs_offset1, example_ys_offset1, xs_offset1)
+    deeponet_y_offset2 = deeponet_model.forward(example_xs_offset2, example_ys_offset2, xs_offset2)
+
+    # Add after getting the ground truth outputs
+    def denormalize(y):
+        mean, std = (2.8366714104777202e-05, 4.263603113940917e-05)
+        return y * std + mean
+
+    # Denormalize before checking linearity
+    ys_hardest_denorm = denormalize(ys_hardest)
+    ys_offset1_denorm = denormalize(ys_offset1)
+    ys_offset2_denorm = denormalize(ys_offset2)
+
+    # Compare ground truth linearity with denormalized values
+    gt_sum = ys_offset1_denorm + ys_offset2_denorm
+    gt_diff = torch.abs(ys_hardest_denorm - gt_sum)
+    print(f"\nGround Truth Linearity Check (Denormalized):")
+    print(f"Max difference: {torch.max(gt_diff):.6e}")
+    print(f"Mean difference: {torch.mean(gt_diff):.6e}")
+
+    # Compare matrix model linearity with denormalized values
+    b2b_y_hardest_denorm = denormalize(b2b_y_hardest)
+    b2b_y_offset1_denorm = denormalize(b2b_y_offset1)
+    b2b_y_offset2_denorm = denormalize(b2b_y_offset2)
+    b2b_sum = b2b_y_offset1_denorm + b2b_y_offset2_denorm
+    b2b_diff = torch.abs(b2b_y_hardest_denorm - b2b_sum)
+    print(f"\nMatrix Model Linearity Check (Denormalized):")
+    print(f"Max difference: {torch.max(b2b_diff):.6e}")
+    print(f"Mean difference: {torch.mean(b2b_diff):.6e}")
+
+    # Compare DeepONet linearity with denormalized values
+    deeponet_y_hardest_denorm = denormalize(deeponet_y_hardest)
+    deeponet_y_offset1_denorm = denormalize(deeponet_y_offset1)
+    deeponet_y_offset2_denorm = denormalize(deeponet_y_offset2)
+    deeponet_sum = deeponet_y_offset1_denorm + deeponet_y_offset2_denorm
+    deeponet_diff = torch.abs(deeponet_y_hardest_denorm - deeponet_sum)
+    print(f"\nDeepONet Linearity Check (Denormalized):")
+    print(f"Max difference: {torch.max(deeponet_diff):.6e}")
+    print(f"Mean difference: {torch.mean(deeponet_diff):.6e}")
 
     # use hardest data
     example_xs, example_ys, xs, ys, info = hardest_example_xs, hardest_example_ys, hardest_xs, hardest_ys, hardest_info
+
+    # Add offset variable
+    _diff1 = 100
+    _diff2 = 50
+    # Get new data for offset index
+    new_index1 = hardest_info['function_indicies'].item() - _diff1
+    new_index2 = hardest_info['function_indicies'].item() - _diff2
+    info1 = {'function_indicies': torch.tensor([new_index1], device=device)}
+    info2 = {'function_indicies': torch.tensor([new_index2], device=device)}
+    example_xs1 = testing_combined_dataset.src_dataset.sample_inputs(info1, None)
+    example_ys1 = testing_combined_dataset.src_dataset.compute_outputs(info1, example_xs1)
+    example_xs2 = testing_combined_dataset.src_dataset.sample_inputs(info2, None)
+    example_ys2 = testing_combined_dataset.src_dataset.compute_outputs(info2, example_xs2)
+    xs1 = testing_combined_dataset.tgt_dataset.sample_inputs(info1, None)
+    xs2 = testing_combined_dataset.tgt_dataset.sample_inputs(info2, None)
+    ys1 = testing_combined_dataset.tgt_dataset.compute_outputs(info1, xs1)
+    ys2 = testing_combined_dataset.tgt_dataset.compute_outputs(info2, xs2)
+
+    # next compute y_hats for all models
+    if type(combined_dataset.src_dataset) == HeatSrcDataset:
+        rep1 = example_ys1[:, 0, :]
+        rep2 = example_ys2[:, 0, :]
+    else:
+        rep1, _ = b2b_model["src"].compute_representation(example_xs1, example_ys1, method=args.train_method)
+        rep2, _ = b2b_model["src"].compute_representation(example_xs2, example_ys2, method=args.train_method)
+
+    if transformation_type == "linear":
+        rep1 = rep1 @ b2b_model["A"].T
+        rep2 = rep2 @ b2b_model["A"].T
+    else:
+        rep1 = b2b_model["A"](rep1)
+        rep2 = b2b_model["A"](rep2)
+
+    b2b_y_hats = b2b_model["tgt"].predict(xs1, rep1) + b2b_model["tgt"].predict(xs2, rep2)
+    deeponet_y_hats = deeponet_model.forward(example_xs1, example_ys1, xs1) + deeponet_model.forward(example_xs2, example_ys2, xs2)
+
+    # Use xs1, for plotting since we're only showing one example
+    xs = xs1
+    example_xs = example_xs1
+    example_ys = example_ys1
 
     # fetch the correct plotting functions
     if args.dataset_type == "Elastic":
@@ -293,48 +422,33 @@ with torch.no_grad():
         plot_transformation = plot_transformation_L
     else:
         raise ValueError(f"Unknown dataset type: {args.dataset_type}")
-    
 
     if args.dataset_type == "Heat":
-        function_indicies = info["function_indicies"]
+        function_indicies = info1["function_indicies"]
         all_xs = testing_combined_dataset.tgt_dataset.xs[function_indicies]
         all_ys = testing_combined_dataset.tgt_dataset.ys[function_indicies]
 
         # get subset we want to plot        
         xs = all_xs[:, 49::99, :]
         ys = all_ys[:, 49::99, :]
-        grid = example_xs
-        grid_outs =  example_ys
+        grid = example_xs1
+        grid_outs = example_ys1
     else:
-        grid = example_xs
-        grid_outs = example_ys
-
+        grid = example_xs1
+        grid_outs = example_ys1
 
     # first compute example y_hats 
     if dataset_type != "Heat":
-        b2b_example_y_hats = b2b_model["src"].predict_from_examples(example_xs, example_ys, grid, method=args.train_method)
+        b2b_example_y_hats = b2b_model["src"].predict_from_examples(example_xs1, example_ys1, grid, method=args.train_method)
     else:
         b2b_example_y_hats = None
     deeponet_example_y_hats = None
 
-    # next compute y_hats for all models
-    if type(combined_dataset.src_dataset) == HeatSrcDataset:
-        rep = example_ys[:, 0, :]
-    else:
-        rep, _ = b2b_model["src"].compute_representation(example_xs, example_ys, method=args.train_method)
-
-
-    if transformation_type == "linear":
-        rep = rep @ b2b_model["A"].T
-    else:
-        rep = b2b_model["A"](rep)
-    b2b_y_hats = b2b_model["tgt"].predict(xs, rep)
-    deeponet_y_hats = deeponet_model.forward(example_xs, example_ys, xs)
-
-    dict_b2b = copy.deepcopy(info)
+    dict_b2b = copy.deepcopy(info1)
     dict_b2b["model_type"] = "matrix_least_squares"
-    dict_deeponet = copy.deepcopy(info)
+    dict_deeponet = copy.deepcopy(info1)
     dict_deeponet["model_type"] = "deeponet"
-    plot_transformation(grid, grid_outs, b2b_example_y_hats, xs, ys, b2b_y_hats, dict_b2b, args.load_path_matrix)
-    plot_transformation(grid, grid_outs, deeponet_example_y_hats, xs, ys, deeponet_y_hats,dict_deeponet, args.load_path_deeponet)
+    
+    plot_transformation(grid, grid_outs, b2b_example_y_hats, xs, b2b_y_hardest_denorm, b2b_sum, dict_b2b, args.load_path_matrix)
+    plot_transformation(grid, grid_outs, deeponet_example_y_hats, xs, deeponet_y_hardest_denorm, deeponet_sum, dict_deeponet, args.load_path_deeponet)
 

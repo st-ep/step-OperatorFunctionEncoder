@@ -275,8 +275,20 @@ with torch.no_grad():
     print(f"\nHardest example function index: {hardest_info['function_indicies'].item()}")  # Print the actual function index
     print(f"Maximum loss value: {b2b_loss:.6f}")
 
-    # use hardest data
-    example_xs, example_ys, xs, ys, info = hardest_example_xs, hardest_example_ys, hardest_xs, hardest_ys, hardest_info
+    # Add offset variable
+    _diff = 0
+    
+    # Get new data for offset index
+    new_index = hardest_info['function_indicies'].item() - _diff
+    example_xs, example_ys, xs, ys, info = testing_combined_dataset.sample(device)
+    info = {'function_indicies': torch.tensor([new_index], device=device)}
+    
+    # Override the sampled data with specific index data
+    info = {"function_indicies": torch.tensor([new_index], device=device)}
+    example_xs = testing_combined_dataset.src_dataset.sample_inputs(info, None)
+    example_ys = testing_combined_dataset.src_dataset.compute_outputs(info, example_xs)
+    xs = testing_combined_dataset.tgt_dataset.sample_inputs(info, None)
+    ys = testing_combined_dataset.tgt_dataset.compute_outputs(info, xs)
 
     # fetch the correct plotting functions
     if args.dataset_type == "Elastic":

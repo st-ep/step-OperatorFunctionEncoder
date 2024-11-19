@@ -259,40 +259,17 @@ def plot_target_boundary(xs, ys, y_hats, info, logdir):
     plt.clf()
 
 def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, y_hats, info, logdir):
-    # Set custom style parameters directly without using style sheets
-    plt.rcParams.update({
-        'figure.facecolor': 'white',
-        'axes.facecolor': '#f0f0f0',
-        'axes.grid': True,
-        'grid.color': 'white',
-        'grid.linestyle': '-',
-        'grid.linewidth': 1.5,
-        'axes.spines.left': True,
-        'axes.spines.bottom': True,
-        'axes.spines.right': True,
-        'axes.spines.top': True,
-        'font.family': 'sans-serif',
-        'font.size': 12,
-        'axes.labelsize': 14,
-        'axes.titlesize': 16,
-        'xtick.labelsize': 12,
-        'ytick.labelsize': 12,
-        'lines.linewidth': 2,
-        'axes.prop_cycle': plt.cycler('color', ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']),
-    })
-    
-    # Increase DPI for sharper images
     size = 5
-    fig = plt.figure(figsize=(4.6 * size, 1 * size), dpi=400)
+    fig = plt.figure(figsize=(4.6 * size, 1 * size), dpi=300)
 
-    # create 3 types of plots
-    gridspec_left = fig.add_gridspec(1, 3, )
+    # create 3 types of plots - removed the left plot for forcing function
+    gridspec_left = fig.add_gridspec(1, 2, )  # Changed from 3 to 2 columns
     gridspec_cb1 = fig.add_gridspec(1, 1, )
     gridspec_right = fig.add_gridspec(1, 1, )
     gridspec_cb2 = fig.add_gridspec(1, 1, )
     
-    # compute boundaries. 
-    width_ratios=[1, 1, 1, 0.11, 1, 0.11]
+    # compute boundaries - adjusted width ratios and spacing
+    width_ratios=[1, 1, 0.05, 1, 0.05]  # Reduced colorbar widths from 0.11 to 0.05
     start = 0.05
     stop = 0.95
     wspace = 0.01
@@ -300,19 +277,18 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
     width = available_space / sum(width_ratios)
 
     left1 = start
-    right1 = start + width * 3
+    right1 = start + width * 2
     left2 = right1 + wspace
-    right2 = left2 + 0.11 * width
+    right2 = left2 + 0.05 * width  # Reduced from 0.11 to 0.05
     left3 = right2 + 4.5 * wspace
     right3 = left3 + width
     left4 = right3 + wspace * 0.0
-    right4 = left4 + 0.11 * width
+    right4 = left4 + 0.05 * width  # Reduced from 0.11 to 0.05
 
     gridspec_left.update(left=left1, right=right1, wspace=0.15)
     gridspec_cb1.update(left=left2, right=right2)
     gridspec_right.update(left=left3, right=right3)
     gridspec_cb2.update(left=left4, right=right4)
-
 
     # adjust the horizontal spacing of the last plot
     
@@ -323,13 +299,15 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
 
     for row in range(example_xs.shape[0]):
         # plot the forcing function
-        ax = fig.add_subplot(gridspec_left[0, 0])
-        ax.plot(example_xs[row].cpu(), example_ys[row].cpu())
-        ax.set_title(f"Forcing function", fontsize=20)
-        ax.set_xticks([0.0, 0.5, 1.0])
-        ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3))
-        ax.legend(frameon=False)
-        ax.set_box_aspect(1)
+        #ax = fig.add_subplot(gridspec_left[0, 0])
+        #ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color='black')
+        #if example_y_hats is not None:
+        #    ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
+        #ax.set_title(f"Forcing function", fontsize=20)
+        #ax.set_xticks([0.0, 0.5, 1.0])
+        #ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3))
+        #ax.legend(frameon=False)
+        #ax.set_box_aspect(1)
 
         # plot the arrows for transformation
         # add an arrow to the middle column
@@ -368,7 +346,7 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
                     grid_intensity[i, j] = np.nan
 
         # mesh plot
-        ax = fig.add_subplot(gridspec_left[0, 1])
+        ax = fig.add_subplot(gridspec_left[0, 0])  # Changed from [0, 1] to [0, 0]
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
         mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
@@ -399,7 +377,7 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
                     grid_intensity[i, j] = np.nan
 
         # mesh plot
-        ax = fig.add_subplot(gridspec_left[0, 2])
+        ax = fig.add_subplot(gridspec_left[0, 1])  # Changed from [0, 2] to [0, 1]
         mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
         title = "Predicted Displacement abs(u)"
         ax.set_xticks([0.0, 0.5, 1.0])
@@ -446,7 +424,7 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
 
 
         # mesh plot for absolute error
-        vmax = (vmax - vmin) * 0.005  # it was 0.01 before
+        vmax = (vmax - vmin) * 0.005  # Changed from 0.01 to 0.1 for 10% range
         vmin = 0
         ax = fig.add_subplot(gridspec_right[0, 0])
         mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
