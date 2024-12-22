@@ -236,15 +236,26 @@ deeponet_model.load_state_dict(torch.load(f"{args.load_path_deeponet}/model.pth"
 
 
 ##############   Evaluate    ###################
+# Define denormalize function before the search loop
+def denormalize(y):
+    mean, std = (2.8366714104777202e-05, 4.263603113940917e-05)
+    return y * std + mean
+
 with torch.no_grad():
-    
     hardest_example_xs, hardest_example_ys, hardest_xs, hardest_ys, hardest_info = None, None, None, None, None
-    b2b_loss = -1000000
-    hardest_index = -1  # Add this to track the index
-    
+    max_relative_loss = -1000000
+    hardest_index = -1
+    found_valid_example = False
+
     for search_step in trange(1000):
-        # plot transformation for all model types
         example_xs, example_ys, xs, ys, info = testing_combined_dataset.sample(device, plot_only=False)
+        
+        # Only consider samples that have at least one index in the range 100-150
+        valid_indices_mask = (info['function_indicies'] >= 100) & (info['function_indicies'] <= 150)
+        if not valid_indices_mask.any():
+            continue
+
+        found_valid_example = True
         
         # get output space predictions
         if type(combined_dataset.src_dataset) == HeatSrcDataset:
@@ -258,22 +269,33 @@ with torch.no_grad():
             rep = b2b_model["A"](rep)
         b2b_y_hats = b2b_model["tgt"].predict(xs, rep)
 
-        # compute the loss for each function
-        losses = ((b2b_y_hats - ys)**2).mean(dim=(1,2))
+        # Denormalize predictions and ground truth
+        ys_denorm = denormalize(ys)
+        b2b_y_hats_denorm = denormalize(b2b_y_hats)
 
-        # get the hardest example
-        max_index = torch.argmax(losses)
-        if losses[max_index] > b2b_loss:
+        # Compute relative losses for each function
+        max_displacements = ys_denorm.abs().max(dim=1)[0].max(dim=1)[0]  # Maximum displacement for each sample
+        relative_losses = torch.mean(torch.abs(b2b_y_hats_denorm - ys_denorm), dim=(1,2)) / max_displacements
+
+        # Only consider losses for indices in our target range
+        relative_losses[~valid_indices_mask] = -float('inf')  # Set losses for invalid indices to -inf
+
+        # get the hardest example based on relative loss
+        max_index = torch.argmax(relative_losses)
+        if relative_losses[max_index] > max_relative_loss:
             hardest_example_xs = example_xs[max_index:max_index+1]
             hardest_example_ys = example_ys[max_index:max_index+1]
             hardest_xs = xs[max_index:max_index+1]
             hardest_ys = ys[max_index:max_index+1]
             hardest_info = {key: value[max_index:max_index+1] for key, value in info.items()}
-            b2b_loss = losses[max_index]
-            hardest_index = search_step  # Store the search step where we found the hardest example
+            max_relative_loss = relative_losses[max_index]
+            hardest_index = search_step
+
+    if not found_valid_example:
+        raise RuntimeError("No valid examples found in the last 50 samples. Please check the dataset indices.")
 
     print(f"\nHardest example function index: {hardest_info['function_indicies'].item()}")
-    print(f"Maximum loss value: {b2b_loss:.6f}")
+    print(f"Maximum loss value: {max_relative_loss:.6f}")
 
     # Get ground truth displacements
     hardest_index = hardest_info['function_indicies'].item()
@@ -299,24 +321,13 @@ with torch.no_grad():
     example_ys_offset1 = testing_combined_dataset.src_dataset.compute_outputs(info_offset1, example_xs_offset1)
     example_ys_offset2 = testing_combined_dataset.src_dataset.compute_outputs(info_offset2, example_xs_offset2)
 
-    # Get matrix model predictions
-    if type(combined_dataset.src_dataset) == HeatSrcDataset:
-        rep_hardest = example_ys_hardest[:, 0, :]
-        rep_offset1 = example_ys_offset1[:, 0, :]
-        rep_offset2 = example_ys_offset2[:, 0, :]
-    else:
-        rep_hardest, _ = b2b_model["src"].compute_representation(example_xs_hardest, example_ys_hardest, method=args.train_method)
-        rep_offset1, _ = b2b_model["src"].compute_representation(example_xs_offset1, example_ys_offset1, method=args.train_method)
-        rep_offset2, _ = b2b_model["src"].compute_representation(example_xs_offset2, example_ys_offset2, method=args.train_method)
+    rep_hardest, _ = b2b_model["src"].compute_representation(example_xs_hardest, example_ys_hardest, method=args.train_method)
+    rep_offset1, _ = b2b_model["src"].compute_representation(example_xs_offset1, example_ys_offset1, method=args.train_method)
+    rep_offset2, _ = b2b_model["src"].compute_representation(example_xs_offset2, example_ys_offset2, method=args.train_method)
 
-    if transformation_type == "linear":
-        rep_hardest = rep_hardest @ b2b_model["A"].T
-        rep_offset1 = rep_offset1 @ b2b_model["A"].T
-        rep_offset2 = rep_offset2 @ b2b_model["A"].T
-    else:
-        rep_hardest = b2b_model["A"](rep_hardest)
-        rep_offset1 = b2b_model["A"](rep_offset1)
-        rep_offset2 = b2b_model["A"](rep_offset2)
+    rep_hardest = b2b_model["A"](rep_hardest)
+    rep_offset1 = b2b_model["A"](rep_offset1)
+    rep_offset2 = b2b_model["A"](rep_offset2)
 
     b2b_y_hardest = b2b_model["tgt"].predict(xs_hardest, rep_hardest)
     b2b_y_offset1 = b2b_model["tgt"].predict(xs_offset1, rep_offset1)
@@ -348,7 +359,7 @@ with torch.no_grad():
     b2b_y_hardest_denorm = denormalize(b2b_y_hardest)
     b2b_y_offset1_denorm = denormalize(b2b_y_offset1)
     b2b_y_offset2_denorm = denormalize(b2b_y_offset2)
-    b2b_sum = b2b_y_offset1_denorm + b2b_y_offset2_denorm
+    b2b_sum = 10*b2b_y_offset1_denorm + 15*b2b_y_offset2_denorm
     b2b_diff = torch.abs(b2b_y_hardest_denorm - b2b_sum)
     print(f"\nMatrix Model Linearity Check (Denormalized):")
     print(f"Max difference: {torch.max(b2b_diff):.6e}")
@@ -358,11 +369,22 @@ with torch.no_grad():
     deeponet_y_hardest_denorm = denormalize(deeponet_y_hardest)
     deeponet_y_offset1_denorm = denormalize(deeponet_y_offset1)
     deeponet_y_offset2_denorm = denormalize(deeponet_y_offset2)
-    deeponet_sum = deeponet_y_offset1_denorm + deeponet_y_offset2_denorm
+    deeponet_sum = 10*deeponet_y_offset1_denorm + 15*deeponet_y_offset2_denorm
     deeponet_diff = torch.abs(deeponet_y_hardest_denorm - deeponet_sum)
     print(f"\nDeepONet Linearity Check (Denormalized):")
     print(f"Max difference: {torch.max(deeponet_diff):.6e}")
     print(f"Mean difference: {torch.mean(deeponet_diff):.6e}")
+
+    # Calculate and print average relative losses for the hardest sample
+    max_displacement = ys_hardest_denorm.abs().max()
+    b2b_relative_loss = torch.mean(torch.abs(b2b_y_hardest_denorm - ys_hardest_denorm)) / max_displacement
+    deeponet_relative_loss = torch.mean(torch.abs(deeponet_y_hardest_denorm - ys_hardest_denorm)) / max_displacement
+    
+    print(f"\nRelative Losses (MAE) for hardest sample:")
+    print(f"B2B Relative Loss: {(b2b_relative_loss * 100):.4f}%")
+    print(f"DeepONet Relative Loss: {(deeponet_relative_loss * 100):.4f}%")
+    print(f"Relative Difference: {(abs(b2b_relative_loss - deeponet_relative_loss) * 100):.4f}%")
+    print(f"Ratio: {deeponet_relative_loss / b2b_relative_loss:.4f}")
 
     # use hardest data
     example_xs, example_ys, xs, ys, info = hardest_example_xs, hardest_example_ys, hardest_xs, hardest_ys, hardest_info
@@ -384,24 +406,6 @@ with torch.no_grad():
     ys1 = testing_combined_dataset.tgt_dataset.compute_outputs(info1, xs1)
     ys2 = testing_combined_dataset.tgt_dataset.compute_outputs(info2, xs2)
 
-    # next compute y_hats for all models
-    if type(combined_dataset.src_dataset) == HeatSrcDataset:
-        rep1 = example_ys1[:, 0, :]
-        rep2 = example_ys2[:, 0, :]
-    else:
-        rep1, _ = b2b_model["src"].compute_representation(example_xs1, example_ys1, method=args.train_method)
-        rep2, _ = b2b_model["src"].compute_representation(example_xs2, example_ys2, method=args.train_method)
-
-    if transformation_type == "linear":
-        rep1 = rep1 @ b2b_model["A"].T
-        rep2 = rep2 @ b2b_model["A"].T
-    else:
-        rep1 = b2b_model["A"](rep1)
-        rep2 = b2b_model["A"](rep2)
-
-    b2b_y_hats = b2b_model["tgt"].predict(xs1, rep1) + b2b_model["tgt"].predict(xs2, rep2)
-    deeponet_y_hats = deeponet_model.forward(example_xs1, example_ys1, xs1) + deeponet_model.forward(example_xs2, example_ys2, xs2)
-
     # Use xs1, for plotting since we're only showing one example
     xs = xs1
     example_xs = example_xs1
@@ -412,36 +416,14 @@ with torch.no_grad():
         plot_source = plot_source_boundary_force
         plot_target = plot_target_boundary
         plot_transformation = plot_transformation_elastic
-    elif args.dataset_type == "Heat":
-        plot_source = plot_source_heat
-        plot_target = plot_target_heat
-        plot_transformation = plot_transformation_heat
-    elif args.dataset_type == "LShaped":
-        plot_source = plot_source_L
-        plot_target = plot_target_L
-        plot_transformation = plot_transformation_L
     else:
         raise ValueError(f"Unknown dataset type: {args.dataset_type}")
 
-    if args.dataset_type == "Heat":
-        function_indicies = info1["function_indicies"]
-        all_xs = testing_combined_dataset.tgt_dataset.xs[function_indicies]
-        all_ys = testing_combined_dataset.tgt_dataset.ys[function_indicies]
-
-        # get subset we want to plot        
-        xs = all_xs[:, 49::99, :]
-        ys = all_ys[:, 49::99, :]
-        grid = example_xs1
-        grid_outs = example_ys1
-    else:
-        grid = example_xs1
-        grid_outs = example_ys1
+    grid = example_xs1
+    grid_outs = example_ys1
 
     # first compute example y_hats 
-    if dataset_type != "Heat":
-        b2b_example_y_hats = b2b_model["src"].predict_from_examples(example_xs1, example_ys1, grid, method=args.train_method)
-    else:
-        b2b_example_y_hats = None
+    b2b_example_y_hats = None
     deeponet_example_y_hats = None
 
     dict_b2b = copy.deepcopy(info1)

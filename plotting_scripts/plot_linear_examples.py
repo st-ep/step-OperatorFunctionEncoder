@@ -16,7 +16,7 @@ def data_to_normalized(point, ax, width, height, dpi):
 
 
 # params
-exp_dir = "logs_experiment"
+exp_dir = "derive_logs"
 datasets = ["Derivative", "Integral"]
 csv_name = "plot.csv"
 algs = ["SVD_least_squares", "matrix_least_squares", "Eigen_least_squares","deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn"]

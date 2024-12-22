@@ -185,6 +185,7 @@ def plot_source_boundary_force(xs, ys, y_hats, info, logdir):
             ax.legend()
 
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.175, top=0.95)
     plt.savefig(f"{logdir}/source.png")
     plt.clf()
 
@@ -255,6 +256,7 @@ def plot_target_boundary(xs, ys, y_hats, info, logdir):
     cbar = plt.colorbar(mesh, cax=ax)
 
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.175, top=0.95)
     plt.savefig(f"{logdir}/target.png")
     plt.clf()
 
@@ -262,11 +264,12 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
     # Set custom style parameters directly without using style sheets
     plt.rcParams.update({
         'figure.facecolor': 'white',
-        'axes.facecolor': '#f0f0f0',
+        'axes.facecolor': 'white',
         'axes.grid': True,
-        'grid.color': 'white',
+        'grid.color': '#E6E6E6',
         'grid.linestyle': '-',
         'grid.linewidth': 1.5,
+        'grid.alpha': 1.0,
         'axes.spines.left': True,
         'axes.spines.bottom': True,
         'axes.spines.right': True,
@@ -275,8 +278,8 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
         'font.size': 12,
         'axes.labelsize': 14,
         'axes.titlesize': 16,
-        'xtick.labelsize': 12,
-        'ytick.labelsize': 12,
+        'xtick.labelsize': 20,
+        'ytick.labelsize': 20,
         'lines.linewidth': 2,
         'axes.prop_cycle': plt.cycler('color', ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']),
     })
@@ -293,7 +296,7 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
     
     # compute boundaries. 
     width_ratios=[1, 1, 1, 0.11, 1, 0.11]
-    start = 0.05
+    start = 0.03
     stop = 0.95
     wspace = 0.01
     available_space = stop - start - wspace * (len(width_ratios) - 1)
@@ -303,7 +306,7 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
     right1 = start + width * 3
     left2 = right1 + wspace
     right2 = left2 + 0.11 * width
-    left3 = right2 + 4.5 * wspace
+    left3 = right2 + 5.0 * wspace
     right3 = left3 + width
     left4 = right3 + wspace * 0.0
     right4 = left4 + 0.11 * width
@@ -324,10 +327,11 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
     for row in range(example_xs.shape[0]):
         # plot the forcing function
         ax = fig.add_subplot(gridspec_left[0, 0])
-        ax.plot(example_xs[row].cpu(), example_ys[row].cpu())
-        ax.set_title(f"Forcing function", fontsize=20)
-        ax.set_xticks([0.0, 0.5, 1.0])
-        ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3))
+        ax.plot(example_ys[row].cpu(), example_xs[row].cpu())
+        ax.invert_xaxis()
+        ax.set_title(f"(a) Forcing function", fontsize=25, y=-0.2)
+        ax.set_yticks([1.0, 0.5, 0.0])
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=3))
         ax.legend(frameon=False)
         ax.set_box_aspect(1)
 
@@ -371,9 +375,13 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
         ax = fig.add_subplot(gridspec_left[0, 1])
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.grid(True, which='major', linewidth=1.0, alpha=0.9)
+        ax.grid(True, which='minor', linewidth=1.0, alpha=0.9)
         mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
-        title = "Groundtruth Displacement abs(u)"
-        ax.set_title(title, fontsize=20)
+        title = "(b) Groundtruth X Displacement"
+        ax.set_title(title, fontsize=25, y=-0.2)
         ax.set_box_aspect(1)
 
         # fetch data
@@ -400,11 +408,15 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
 
         # mesh plot
         ax = fig.add_subplot(gridspec_left[0, 2])
-        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
-        title = "Predicted Displacement abs(u)"
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
-        ax.set_title(title, fontsize=20)
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.grid(True, which='major', linewidth=1.0, alpha=0.9)
+        ax.grid(True, which='minor', linewidth=1.0, alpha=0.9)
+        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
+        title = "(c) Predicted X Displacement"
+        ax.set_title(title, fontsize=25, y=-0.2)
         ax.set_box_aspect(1)
 
 
@@ -423,7 +435,9 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
         xx, yy = xs[row, :, 0].cpu(), xs[row, :, 1].cpu()
         groundtruth_displacement_x = ys[row, :, 0]
         predicted_displacement_x = y_hats[row, :, 0]
-        difference = (groundtruth_displacement_x - predicted_displacement_x).abs()
+        # Calculate relative error as percentage
+        max_displacement = groundtruth_displacement_x.abs().max()
+        difference = (groundtruth_displacement_x - predicted_displacement_x).abs() / max_displacement * 100
 
         # plot details
         image_density = 200j
@@ -445,18 +459,31 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
 
 
 
-        # mesh plot for absolute error
-        vmax = (vmax - vmin) * 0.005  # it was 0.01 before
+        # mesh plot for relative error
+        vmax = 2.0  # showing up to 1.5% relative error
         vmin = 0
         ax = fig.add_subplot(gridspec_right[0, 0])
-        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
-        title = "Absolute Error"
-        ax.set_title(title, fontsize=20)
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.grid(True, which='major', linewidth=1.0, alpha=0.9)
+        ax.grid(True, which='minor', linewidth=1.0, alpha=0.9)
+        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
+        title = "(d) Relative Error (\\%)"
+        ax.set_title(title, fontsize=25, y=-0.2)
         ax.set_box_aspect(1)
 
-        
+        # Draw vertical white lines at x=0.1 and x=0.9, spanning from y=0.1 to y=0.9
+        #ax.axvline(x=0.1, ymin=0.1, ymax=0.9, color='white', linewidth=4)
+        #ax.axvline(x=0.9, ymin=0.1, ymax=0.9, color='white', linewidth=4)
+        #ax.axhline(y=0.1, xmin=0.1, xmax=0.9, color='white', linewidth=4)
+        #ax.axhline(y=0.9, xmin=0.1, xmax=0.9, color='white', linewidth=4)
+        #ax.axvline(x=0.2, ymin=0.2, ymax=0.8, color='white', linewidth=4)
+        #ax.axvline(x=0.8, ymin=0.2, ymax=0.8, color='white', linewidth=4)
+        #ax.axhline(y=0.2, xmin=0.2, xmax=0.8, color='white', linewidth=4)
+        #ax.axhline(y=0.8, xmin=0.2, xmax=0.8, color='white', linewidth=4)
+
         # plot the colorbar
         ax = fig.add_subplot(gridspec_cb2[0, 0])
         cbar = plt.colorbar(mesh, cax=ax)
@@ -473,6 +500,7 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
         
 
         plt.tight_layout(w_pad=0.2)
+        plt.subplots_adjust(bottom=0.175, top=0.95)
         plot_name = f"{logdir}/qualitative_Elastic_{label.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')}_{row}.png"
         plt.savefig(plot_name)
         print("Saving to ", plot_name)

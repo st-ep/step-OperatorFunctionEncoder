@@ -244,7 +244,7 @@ def plot_target_boundary(xs, ys, y_hats, info, logdir):
             plt.gca().set_aspect('equal', adjustable='box')
             plt.xlabel("x")
             plt.ylabel("y")
-            title = "Groundtruth x displacement" if col == 0 else \
+            title = "Sum of x displacements" if col == 0 else \
                     "Groundtruth y displacement" if col == 1 else \
                     "Predicted x displacement" if col == 2 else \
                     "Predicted y displacement"
@@ -259,66 +259,66 @@ def plot_target_boundary(xs, ys, y_hats, info, logdir):
     plt.clf()
 
 def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, y_hats, info, logdir):
-    size = 5
-    fig = plt.figure(figsize=(4.6 * size, 1 * size), dpi=300)
+    # Set custom style parameters directly without using style sheets
+    plt.rcParams.update({
+        'figure.facecolor': 'white',
+        'axes.facecolor': 'white',
+        'axes.grid': True,
+        'grid.color': '#E6E6E6',
+        'grid.linestyle': '-',
+        'grid.linewidth': 1.5,
+        'grid.alpha': 1.0,
+        'axes.spines.left': True,
+        'axes.spines.bottom': True,
+        'axes.spines.right': True,
+        'axes.spines.top': True,
+        'font.family': 'sans-serif',
+        'font.size': 12,
+        'axes.labelsize': 14,
+        'axes.titlesize': 16,
+        'xtick.labelsize': 20,
+        'ytick.labelsize': 20,
+        'lines.linewidth': 2,
+        'axes.prop_cycle': plt.cycler('color', ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']),
+    })
 
-    # create 3 types of plots - removed the left plot for forcing function
-    gridspec_left = fig.add_gridspec(1, 2, )  # Changed from 3 to 2 columns
-    gridspec_cb1 = fig.add_gridspec(1, 1, )
-    gridspec_right = fig.add_gridspec(1, 1, )
-    gridspec_cb2 = fig.add_gridspec(1, 1, )
-    
-    # compute boundaries - adjusted width ratios and spacing
-    width_ratios=[1, 1, 0.05, 1, 0.05]  # Reduced colorbar widths from 0.11 to 0.05
+    size = 5
+    fig = plt.figure(figsize=(3.5 * size, 1 * size), dpi=400)
+
+    # Create gridspecs with correct dimensions
+    gridspec_left = fig.add_gridspec(1, 2)
+    gridspec_cb1 = fig.add_gridspec(1, 1)
+    gridspec_right = fig.add_gridspec(1, 1)
+    gridspec_cb2 = fig.add_gridspec(1, 1)
+
+    # compute boundaries
+    width_ratios=[1, 1, 0.11, 1, 0.11]
     start = 0.05
     stop = 0.95
     wspace = 0.01
-    available_space = stop - start - wspace * (len(width_ratios) - 1)
+    extra_space = 0.05
+    available_space = stop - start - wspace * (len(width_ratios) - 1) - extra_space
     width = available_space / sum(width_ratios)
 
     left1 = start
     right1 = start + width * 2
     left2 = right1 + wspace
-    right2 = left2 + 0.05 * width  # Reduced from 0.11 to 0.05
-    left3 = right2 + 4.5 * wspace
+    right2 = left2 + 0.11 * width
+    left3 = right2 + wspace + extra_space
     right3 = left3 + width
-    left4 = right3 + wspace * 0.0
-    right4 = left4 + 0.05 * width  # Reduced from 0.11 to 0.05
+    left4 = right3 + wspace
+    right4 = left4 + 0.11 * width
 
     gridspec_left.update(left=left1, right=right1, wspace=0.15)
     gridspec_cb1.update(left=left2, right=right2)
     gridspec_right.update(left=left3, right=right3)
     gridspec_cb2.update(left=left4, right=right4)
 
-    # adjust the horizontal spacing of the last plot
-    
-
     model_type = info["model_type"]
     color = colors[model_type]
     label = labels[model_type]
 
     for row in range(example_xs.shape[0]):
-        # plot the forcing function
-        #ax = fig.add_subplot(gridspec_left[0, 0])
-        #ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color='black')
-        #if example_y_hats is not None:
-        #    ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
-        #ax.set_title(f"Forcing function", fontsize=20)
-        #ax.set_xticks([0.0, 0.5, 1.0])
-        #ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3))
-        #ax.legend(frameon=False)
-        #ax.set_box_aspect(1)
-
-        # plot the arrows for transformation
-        # add an arrow to the middle column
-        # and a T right above it
-        # ax = fig.add_subplot(gridspec[row, 1])
-        # ax.arrow(0, 0, 0.25, 0.0, head_width=0.1, head_length=0.1, fc='black', ec='black', lw=15)
-        # ax.text(0.1, 0.1, "T", fontsize=30)
-        # ax.set_xlim(0, 0.5)
-        # ax.set_ylim(-0.3, 0.3)
-        # ax.axis("off")
-    
         # plot the transformation. Its the same 3d mesh plot as the target
         vmin = ys[row].min().item()
         vmax = ys[row].max().item()
@@ -333,7 +333,6 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
                                   -yy.min().cpu().item():yy.max().cpu().item():image_density]
         points = np.array([xx.flatten().cpu(), yy.flatten().cpu()]).T
 
-
         # get colors
         intensity = groundtruth_displacement_x
         grid_intensity = griddata(points, intensity.cpu(), (grid_x, grid_y), method='cubic')
@@ -341,116 +340,106 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
         # remove the points inside the hole
         for i in range(grid_x.shape[0]):
             for j in range(grid_x.shape[1]):
-                distance = np.sqrt((grid_x[i, j] - 0.5) ** 2 + (grid_y[i, j] - 0.5) ** 2) # .min()
+                distance = np.sqrt((grid_x[i, j] - 0.5) ** 2 + (grid_y[i, j] - 0.5) ** 2)
                 if distance < 0.25:
                     grid_intensity[i, j] = np.nan
 
         # mesh plot
-        ax = fig.add_subplot(gridspec_left[0, 0])  # Changed from [0, 1] to [0, 0]
+        ax = fig.add_subplot(gridspec_left[0, 0])
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.grid(True, which='major', linewidth=1.0, alpha=0.9)
+        ax.grid(True, which='minor', linewidth=1.0, alpha=0.9)
         mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
-        title = "Groundtruth Displacement abs(u)"
-        ax.set_title(title, fontsize=20)
+        title = "(a) Sum of X Displacements"
+        ax.set_title(title, fontsize=25, y=-0.2)
         ax.set_box_aspect(1)
 
         # fetch data
-        xx, yy = xs[row, :, 0].cpu(), xs[row, :, 1].cpu()
         estimated_displacement_x = y_hats[row, :, 0]
         
         # plot details
-        image_density = 200j
-        grid_x, grid_y = np.mgrid[-xx.min().cpu().item():xx.max().cpu().item():image_density, 
-                                  -yy.min().cpu().item():yy.max().cpu().item():image_density]
-        points = np.array([xx.flatten().cpu(), yy.flatten().cpu()]).T
-
-
-        # get colors
         intensity = estimated_displacement_x
         grid_intensity = griddata(points, intensity.cpu(), (grid_x, grid_y), method='cubic')
 
         # remove the points inside the hole
         for i in range(grid_x.shape[0]):
             for j in range(grid_x.shape[1]):
-                distance = np.sqrt((grid_x[i, j] - 0.5) ** 2 + (grid_y[i, j] - 0.5) ** 2) # .min()
+                distance = np.sqrt((grid_x[i, j] - 0.5) ** 2 + (grid_y[i, j] - 0.5) ** 2)
                 if distance < 0.25:
                     grid_intensity[i, j] = np.nan
 
         # mesh plot
-        ax = fig.add_subplot(gridspec_left[0, 1])  # Changed from [0, 2] to [0, 1]
-        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
-        title = "Predicted Displacement abs(u)"
+        ax = fig.add_subplot(gridspec_left[0, 1])
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
-        ax.set_title(title, fontsize=20)
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.grid(True, which='major', linewidth=1.0, alpha=0.9)
+        ax.grid(True, which='minor', linewidth=1.0, alpha=0.9)
+        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
+        title = "(b) Predicted X Displacement"
+        ax.set_title(title, fontsize=25, y=-0.2)
         ax.set_box_aspect(1)
-
 
         # plot the colorbar
         ax = fig.add_subplot(gridspec_cb1[0, 0])
         cbar = plt.colorbar(mesh, cax=ax)
-        # adjust the colorbar to set the labels to the left
-        # cbar.ax.set_position(cbar.ax.get_position().translated(-0.05, 0))        
-        # cbar.ax.yaxis.set_ticks_position('left')
-        # cbar.ax.yaxis.set_label_position('left')
-        ax.set_yticks([vmin,(vmax+vmin)/2 ,vmax])
+        
+        # Format ticks in scientific notation
+        power = int(np.floor(np.log10(np.abs(vmax))))
+        scaled_vmin = vmin / (10**power)
+        scaled_vmax = vmax / (10**power)
+        scaled_mid = (scaled_vmin + scaled_vmax) / 2
+        
+        ax.set_yticks([vmin, (vmax+vmin)/2, vmax])
+        ax.set_yticklabels([f'{scaled_vmin:.1f}', f'{scaled_mid:.1f}', f'{scaled_vmax:.1f}'])
+        
+        # Change the text position to be centered above the colorbar
+        ax.text(0.75, 1.05, f'×10$^{{{power}}}$', transform=ax.transAxes, 
+                ha='center', va='bottom', fontsize=20)  # Changed x from 2.5 to 0.5 and ha to 'center'
 
         # now compute the difference between y_hats and y
-        # then plot the same way
-        # fetch data
-        xx, yy = xs[row, :, 0].cpu(), xs[row, :, 1].cpu()
         groundtruth_displacement_x = ys[row, :, 0]
         predicted_displacement_x = y_hats[row, :, 0]
-        difference = (groundtruth_displacement_x - predicted_displacement_x).abs()
+        max_displacement = groundtruth_displacement_x.abs().max()
+        difference = (groundtruth_displacement_x - predicted_displacement_x).abs() / max_displacement * 100
 
         # plot details
-        image_density = 200j
-        grid_x, grid_y = np.mgrid[-xx.min().cpu().item():xx.max().cpu().item():image_density, 
-                                  -yy.min().cpu().item():yy.max().item():image_density]
-        points = np.array([xx.flatten().cpu(), yy.flatten().cpu()]).T
-
-
-        # get colors
         intensity = difference
         grid_intensity = griddata(points, intensity.cpu(), (grid_x, grid_y), method='cubic')
 
         # remove the points inside the hole
         for i in range(grid_x.shape[0]):
             for j in range(grid_x.shape[1]):
-                distance = np.sqrt((grid_x[i, j] - 0.5) ** 2 + (grid_y[i, j] - 0.5) ** 2) # .min()
+                distance = np.sqrt((grid_x[i, j] - 0.5) ** 2 + (grid_y[i, j] - 0.5) ** 2)
                 if distance < 0.25:
                     grid_intensity[i, j] = np.nan
 
-
-
-        # mesh plot for absolute error
-        vmax = (vmax - vmin) * 0.005  # Changed from 0.01 to 0.1 for 10% range
+        # mesh plot for relative error
+        vmax = 5.0 # showing up to 1.5% relative error
         vmin = 0
         ax = fig.add_subplot(gridspec_right[0, 0])
-        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
-        title = "Absolute Error"
-        ax.set_title(title, fontsize=20)
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.yaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+        ax.grid(True, which='major', linewidth=1.0, alpha=0.9)
+        ax.grid(True, which='minor', linewidth=1.0, alpha=0.9)
+        mesh = ax.pcolormesh(grid_x, grid_y, grid_intensity, cmap='jet', shading='auto', vmax=vmax, vmin=vmin)
+        title = "(c) Relative Error (\\%)"
+        ax.set_title(title, fontsize=25, y=-0.2)
         ax.set_box_aspect(1)
 
-        
         # plot the colorbar
         ax = fig.add_subplot(gridspec_cb2[0, 0])
         cbar = plt.colorbar(mesh, cax=ax)
-        # shift it to the left by 0.05
-        # print(cbar.ax.get_position())
-        # cbar.ax.set_position(cbar.ax.get_position().translated(-0.15, 0))
-
-        # adjust the colorbar to set the labels to the left
-        # cbar.ax.set_position(cbar.ax.get_position().translated(-0.05, 0))        
-        # cbar.ax.yaxis.set_ticks_position('left')
-        # cbar.ax.yaxis.set_label_position('left')
         ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3))
-        
-        
 
         plt.tight_layout(w_pad=0.2)
+        plt.subplots_adjust(bottom=0.175, top=0.90)
         plot_name = f"{logdir}/qualitative_Elastic_{label.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')}_{row}.png"
         plt.savefig(plot_name)
         print("Saving to ", plot_name)
