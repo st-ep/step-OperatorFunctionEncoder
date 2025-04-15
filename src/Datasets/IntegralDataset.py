@@ -73,7 +73,18 @@ def plot_target_quadratic_integral(xs, ys, y_hats, info, logdir):
 
 def plot_transformation_integral(example_xs, example_ys, example_y_hats, xs, ys, y_hats, info, logdir):
     size = 5
-    # ploting info
+    # Define colors for different model types
+    colors = {
+        "SVD_least_squares": "blue",
+        "Eigen_least_squares": "green",
+        "matrix_least_squares": "red",
+        "deeponet": "purple",
+        "deeponet_cnn": "orange",
+        "deeponet_pod": "brown",
+        "deeponet_2stage": "pink",
+        "deeponet_2stage_cnn": "gray",
+        "deeposet": "cyan",
+    }
     model_type = info["model_type"]
     color = colors[model_type]
     label = labels[model_type]

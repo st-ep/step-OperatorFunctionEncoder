@@ -196,6 +196,28 @@ def predict_number_params(model_type:str,
         num_params += (n_layers - 2) * (hidden_size * hidden_size + hidden_size)
         num_params += hidden_size * tgt_output_space[0] * n_basis + tgt_output_space[0] * n_basis
 
+    elif model_type == "deeposet":
+        # Parameters for Phi network (2 layers)
+        phi_input_dim = src_input_space[0] + src_output_space[0]
+        phi_params = (phi_input_dim * hidden_size + hidden_size) + \
+                     (hidden_size * hidden_size + hidden_size)
+
+        # Parameters for Rho network (2 layers)
+        rho_output_dim = tgt_output_space[0] * n_basis
+        rho_params = (hidden_size * hidden_size + hidden_size) + \
+                     (hidden_size * rho_output_dim + rho_output_dim)
+
+        # Parameters for Trunk network (n_layers)
+        trunk_output_dim = tgt_output_space[0] * n_basis
+        trunk_params = (tgt_input_space[0] * hidden_size + hidden_size) # Input layer
+        if n_layers > 2:
+            trunk_params += (n_layers - 2) * (hidden_size * hidden_size + hidden_size) # Hidden layers
+        trunk_params += (hidden_size * trunk_output_dim + trunk_output_dim) # Output layer
+
+        # Parameters for Bias term (assuming it's always present for prediction)
+        bias_params = tgt_output_space[0]
+
+        return phi_params + rho_params + trunk_params + bias_params
 
     elif model_type == "matrix":
 
@@ -359,3 +381,7 @@ def check_parameters(args):
     if args.model_type == "deeponet_2stage_cnn" and args.dataset_type != "LShaped":
         print(f"DeepOnet 2 stage CNN is only applicable to LShaped Dataset, not {args.dataset_type}. Terminating.")
         exit(0)
+
+    # Add deeposet to relevant checks if needed, e.g.:
+    if args.model_type in ["deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn", "deeposet"] and args.n_basis is None:
+         raise ValueError(f"Model type {args.model_type} requires n_basis to be set.")

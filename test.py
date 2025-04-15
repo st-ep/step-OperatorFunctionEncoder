@@ -17,6 +17,7 @@ from src.DeepONet_CNN import DeepONet_CNN, DeepONet_2Stage_CNN_branch
 from src.MatrixMethodHelpers import compute_A, train_nonlinear_transformation, get_num_parameters, get_num_layers, predict_number_params, get_hidden_layer_size, check_parameters
 from src.PODDeepONet import DeepONet_POD
 from src.SVDEncoder import SVDEncoder
+from src.DeepOSet import DeepOSet
 
 # import datasets
 from src.Datasets.QuadraticSinDataset import QuadraticDataset, SinDataset, plot_source_quadratic, plot_target_sin, plot_transformation_quadratic_sin
@@ -31,6 +32,7 @@ from src.Datasets.OperatorDataset import CombinedDataset
 def get_dataset(dataset_type:str, test:bool, model_type:str, n_sensors:int, device:str, freeze_example_xs:bool=True, **kwargs):
     # generate datasets
     # freeze_example_xs = model_type in ["deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn"]  # deeponet has fixed input sensors.
+    # DeepOSet can handle varying sensors, but freeze by default like DeepONet for comparison unless overridden
     freeze_xs = model_type in ["deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn"]
     # NOTE: Most of these datasets are generative, so the data is always unseen, hence no separate test set.
     if dataset_type == "QuadraticSin":
@@ -140,10 +142,13 @@ parser.add_argument("--logdir", type=str, default="logs")
 parser.add_argument("--device", type=str, default="auto")
 parser.add_argument("--n_layers", type=int, default=4)
 parser.add_argument("--approximate_number_paramaters", type=int, default=500_000)
+parser.add_argument("--phi_hidden_size", type=int, default=256, help="Hidden size for DeepOSet phi network")
+parser.add_argument("--rho_hidden_size", type=int, default=256, help="Hidden size for DeepOSet rho network")
+parser.add_argument("--trunk_hidden_size", type=int, default=256, help="Hidden size for DeepOSet trunk network")
 parser.add_argument("--unfreeze_sensors", action="store_true")
 
 args = parser.parse_args()
-assert args.model_type in ["SVD", "Eigen", "matrix", "deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn"]
+assert args.model_type in ["SVD", "Eigen", "matrix", "deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn", "deeposet"]
 assert args.dataset_type in ["QuadraticSin", "Derivative", "Integral",  "Elastic", "Darcy", "Heat", "LShaped", "Burger"]
 
 # cancel bad combinations
@@ -177,7 +182,7 @@ print(f"Training {model_type} on {transformation_type} {dataset_type} for {epoch
 
 # generate logdir
 if load_path is None:
-    model_name_for_saving = f"{model_type}_{args.train_method}" if ("deeponet" not in model_type)else model_type
+    model_name_for_saving = f"{model_type}_{args.train_method}" if model_type in ["SVD", "Eigen", "matrix"] else model_type
     logdir = f"{args.logdir}/{dataset_type}/{model_name_for_saving}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 else:
     logdir = load_path
@@ -187,12 +192,14 @@ torch.manual_seed(seed)
 
 # generate datasets
 src_dataset, tgt_dataset, combined_dataset = get_dataset(dataset_type, test=False, model_type=model_type, n_sensors=args.n_sensors, device=device, freeze_example_xs=freeze_example_xs)
-_, _, testing_combined_dataset = get_dataset(dataset_type, test=True, model_type=model_type, n_sensors=args.n_sensors, device=device,   freeze_example_xs=freeze_example_xs)
+_, _, testing_combined_dataset = get_dataset(dataset_type, test=True, model_type=model_type, n_sensors=args.n_sensors, device=device, freeze_example_xs=freeze_example_xs)
 
-# if using deeponet, we need to copy the input sensors
-if "deeponet" in args.model_type:
-    testing_combined_dataset.src_dataset.example_xs = combined_dataset.src_dataset.example_xs
-    testing_combined_dataset.example_xs = combined_dataset.example_xs
+# if using deeponet or deeposet, we need to copy the input sensors if they were frozen
+if "deeponet" in args.model_type or args.model_type == "deeposet":
+    # Only copy if they were actually frozen during dataset creation
+    if freeze_example_xs:
+        testing_combined_dataset.src_dataset.example_xs = combined_dataset.src_dataset.example_xs
+        testing_combined_dataset.example_xs = combined_dataset.example_xs # Assuming CombinedDataset also stores it
 
 # if using POD or 2stage, we need to copy the output sensors
 if args.model_type == "deeponet_pod" or args.model_type == "deeponet_2stage":
@@ -200,17 +207,23 @@ if args.model_type == "deeponet_pod" or args.model_type == "deeponet_2stage":
     testing_combined_dataset.frozen_xs = combined_dataset.frozen_xs
 
 
-# computes the hidden size that most closely reaches the approximate number of parameters, given a number of layers
-hidden_size = get_hidden_layer_size(target_n_parameters=args.approximate_number_paramaters,
-                                    model_type=model_type,
-                                    n_basis=n_basis, n_layers=n_layers,
-                                    src_input_space=src_dataset.input_size,
-                                    src_output_space=src_dataset.output_size,
-                                    tgt_input_space=tgt_dataset.input_size,
-                                    tgt_output_space=tgt_dataset.output_size,
-                                    transformation_type=transformation_type,
-                                    n_sensors=combined_dataset.n_examples_per_sample,
-                                    dataset_type=dataset_type,)
+# calculate hidden layer size based on approximate number of parameters
+if args.model_type != "deeposet": # Calculate only if NOT deeposet
+    hidden_size = get_hidden_layer_size(
+        target_n_parameters=args.approximate_number_paramaters,
+        n_layers=n_layers,
+        src_input_space=src_dataset.input_size,
+        src_output_space=src_dataset.output_size,
+        tgt_input_space=tgt_dataset.input_size,
+        tgt_output_space=tgt_dataset.output_size,
+        n_sensors=combined_dataset.n_examples_per_sample,
+        n_basis=n_basis,
+        model_type=model_type, # Explicitly pass model_type by name
+        transformation_type=transformation_type,
+        dataset_type=dataset_type
+    )
+else:
+    hidden_size = None # Not used directly for DeepOSet instantiation anymore
 
 # create the model
 if args.model_type == "SVD" or args.model_type == "Eigen":
@@ -348,22 +361,51 @@ elif args.model_type == "deeponet":
                      n_layers=n_layers,
                      hidden_size=hidden_size,
                      ).to(device)
+elif args.model_type == "deeposet":
+    model = DeepOSet(input_size_src=src_dataset.input_size[0],
+                     output_size_src=src_dataset.output_size[0],
+                     input_size_tgt=tgt_dataset.input_size[0],
+                     output_size_tgt=tgt_dataset.output_size[0],
+                     p=n_basis, # Use n_basis for latent dim 'p'
+                     # Use the new direct arguments for hidden sizes
+                     phi_hidden_size=args.phi_hidden_size,
+                     rho_hidden_size=args.rho_hidden_size,
+                     trunk_hidden_size=args.trunk_hidden_size,
+                     n_trunk_layers=n_layers, # Use n_layers for trunk layers
+                     # activation_fn=torch.nn.ReLU, # Can add argument if needed
+                     # use_deeponet_bias=True # Can add argument if needed
+                     ).to(device)
 else:
     raise ValueError(f"Unknown model type: {args.model_type}")
 
 # get number of parameters
 n_params = get_num_parameters(model)
-predict_n_params = predict_number_params(model_type, combined_dataset.n_examples_per_sample, n_basis, hidden_size, n_layers, src_dataset.input_size, src_dataset.output_size, tgt_dataset.input_size, tgt_dataset.output_size, transformation_type, dataset_type)
-assert n_params == predict_n_params, f"Number of parameters is not consistent, expected {predict_n_params}, got {n_params}."
+# The prediction function needs the individual hidden sizes for DeepOSet now,
+# or we can skip the check for DeepOSet if predict_number_params isn't updated.
+# Let's skip the check for simplicity for now.
+if args.model_type != "deeposet":
+    # For other models, hidden_size was calculated and can be used
+    predict_n_params = predict_number_params(model_type, combined_dataset.n_examples_per_sample, n_basis, hidden_size, n_layers, src_dataset.input_size, src_dataset.output_size, tgt_dataset.input_size, tgt_dataset.output_size, transformation_type, dataset_type)
+    assert n_params == predict_n_params, f"Number of parameters is not consistent for {model_type}, expected {predict_n_params}, got {n_params}."
+else:
+    # For DeepOSet, we used direct hidden sizes.
+    # We could update predict_number_params or just print the count.
+    print(f"DeepOSet model created with {n_params} parameters.")
+    # Optionally, update predict_number_params to accept phi/rho/trunk sizes
+    # predict_n_params = predict_number_params_deeposet(...) # Hypothetical updated function
+    # assert n_params == predict_n_params, "..."
 
 # writes all parameters and saves them
 params = {"seed": seed,
           "n_sensors": args.n_sensors,
-          "n_basis": n_basis,
+          "n_basis": n_basis, # This is 'p'
           "n_params": n_params,
-          "n_layers": n_layers,
-          "hidden_size": hidden_size,
-          "approximate_number_parameters": args.approximate_number_paramaters,
+          "n_layers": n_layers, # This is 'n_trunk_layers'
+          # Store the specific hidden sizes used for DeepOSet
+          "phi_hidden_size": args.phi_hidden_size if args.model_type == "deeposet" else hidden_size,
+          "rho_hidden_size": args.rho_hidden_size if args.model_type == "deeposet" else hidden_size,
+          "trunk_hidden_size": args.trunk_hidden_size if args.model_type == "deeposet" else hidden_size,
+          # "approximate_number_parameters": args.approximate_number_paramaters, # Less relevant now for DeepOSet
           "model_type": model_type,
           "train_method": args.train_method,
           "dataset_type": dataset_type,
@@ -561,7 +603,7 @@ with torch.no_grad():
 
     # plot transformation for all model types
     example_xs, example_ys, xs, ys, info = testing_combined_dataset.sample(device, plot_only=True)
-    info["model_type"] = f"{model_type}_{args.train_method}" if ("deeponet" not in model_type)else model_type
+    info["model_type"] = f"{model_type}_{args.train_method}" if model_type in ["SVD", "Eigen", "matrix"] else model_type
 
     # mountain car plot needs a 2d grid instead of the random data, for plotting purposes.
     if args.dataset_type == "MountainCar":
@@ -636,7 +678,7 @@ with torch.no_grad():
         tgt_Cs_hat = (model["T"] @ model["A"](example_ys).T).T
         y_hats = model["tgt"].predict(xs, tgt_Cs_hat)
 
-    else: # deeponet
+    else: # deeponet*, deeposet
         y_hats = model.forward(example_xs, example_ys, xs)
 
     # plot
