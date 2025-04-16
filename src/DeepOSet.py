@@ -19,6 +19,7 @@ class DeepOSet(torch.nn.Module):
                  n_trunk_layers=4,    # Number of layers in the trunk network (Default)
                  activation_fn=nn.ReLU, # Activation function
                  use_deeponet_bias=True, # Whether to use a bias term after the cross product
+                 phi_output_size=128, # Output dimension of the phi network before aggregation (Default)
                  ):
         super().__init__()
 
@@ -30,6 +31,7 @@ class DeepOSet(torch.nn.Module):
 
         self.p = p
         self.phi_hidden_size = phi_hidden_size
+        self.phi_output_size = phi_output_size
         self.rho_hidden_size = rho_hidden_size
         self.trunk_hidden_size = trunk_hidden_size
         self.n_trunk_layers = n_trunk_layers
@@ -42,14 +44,14 @@ class DeepOSet(torch.nn.Module):
             nn.Linear(phi_input_dim, phi_hidden_size),
             activation_fn(),
             nn.Linear(phi_hidden_size, phi_hidden_size),
-            activation_fn()
-            # Output dim: phi_hidden_size
+            activation_fn(),
+            nn.Linear(phi_hidden_size, phi_output_size)
         )
 
         # Rho network: processes aggregated representation from phi
-        # Input dim: phi_hidden_size (after aggregation)
+        # Input dim: phi_output_size (after aggregation)
         self.rho = nn.Sequential(
-            nn.Linear(phi_hidden_size, rho_hidden_size),
+            nn.Linear(phi_output_size, rho_hidden_size),
             activation_fn(),
             nn.Linear(rho_hidden_size, output_size_tgt * p) # Final branch output (before reshape)
             # Output dim: output_size_tgt * p
@@ -100,15 +102,15 @@ class DeepOSet(torch.nn.Module):
         phi_input_reshaped = phi_input.view(batch_size * n_sensors, -1)
 
         # Apply phi to each (location, value) pair
-        # Shape: (batch_size * n_sensors, phi_hidden_size)
+        # Shape: (batch_size * n_sensors, phi_output_size)
         phi_output = self.phi(phi_input_reshaped)
 
         # Reshape back for aggregation
-        # Shape: (batch_size, n_sensors, phi_hidden_size)
-        phi_output_reshaped = phi_output.view(batch_size, n_sensors, self.phi_hidden_size)
+        # Shape: (batch_size, n_sensors, phi_output_size)
+        phi_output_reshaped = phi_output.view(batch_size, n_sensors, self.phi_output_size)
 
         # Aggregate over the sensor dimension (dim=1) using mean pooling
-        # Shape: (batch_size, phi_hidden_size)
+        # Shape: (batch_size, phi_output_size)
         aggregated = torch.mean(phi_output_reshaped, dim=1)
 
         # Apply rho to the aggregated representation
@@ -224,6 +226,7 @@ class DeepOSet(torch.nn.Module):
         params["output_size_tgt"] = self.output_size_tgt
         params["p"] = self.p
         params["phi_hidden_size"] = self.phi_hidden_size
+        params["phi_output_size"] = self.phi_output_size
         params["rho_hidden_size"] = self.rho_hidden_size
         params["trunk_hidden_size"] = self.trunk_hidden_size
         params["n_trunk_layers"] = self.n_trunk_layers

@@ -55,7 +55,7 @@ class DeepONet(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.randn(output_size_tgt) * 0.1) if use_deeponet_bias else None
 
         # create optimizer
-        self.opt = torch.optim.Adam(self.parameters(), lr=1e-5)
+        self.opt = torch.optim.Adam(self.parameters(), lr=5e-6)
 
         # holdovers from function encoder code, these do nothing
         self.method = "deepONet"
