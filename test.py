@@ -1,5 +1,5 @@
 from datetime import datetime
-
+# here
 import matplotlib.pyplot as plt
 import torch
 import json
@@ -143,15 +143,21 @@ parser.add_argument("--logdir", type=str, default="logs")
 parser.add_argument("--device", type=str, default="auto")
 parser.add_argument("--n_layers", type=int, default=4)
 parser.add_argument("--approximate_number_paramaters", type=int, default=300_000)
+# --- DeepOSet Specific Args ---
 parser.add_argument("--phi_hidden_size", type=int, default=256, help="Hidden size for DeepOSet phi network")
 parser.add_argument("--rho_hidden_size", type=int, default=256, help="Hidden size for DeepOSet rho network")
 parser.add_argument("--trunk_hidden_size", type=int, default=256, help="Hidden size for DeepOSet trunk network")
+parser.add_argument("--pos_encoding_type", type=str, default="mlp", choices=['mlp', 'sinusoidal'], help="Type of positional encoding for DeepOSet ('mlp' or 'sinusoidal')")
+parser.add_argument("--pos_encoding_dim", type=int, default=64, help="Dimension for MLP positional encoding output (concatenate) or sinusoidal features (film)")
+parser.add_argument("--pos_encoding_max_freq", type=float, default=100.0, help="Maximum frequency/scale for sinusoidal positional encoding in DeepOSet") # Make this 10.0
+parser.add_argument("--encoding_strategy", type=str, default="concatenate", choices=['concatenate', 'film'], help="Encoding strategy for DeepOSet branch ('concatenate' or 'film')")
+parser.add_argument("--film_modulation_dim", type=int, default=None, help="Modulation dimension for FiLM strategy (defaults to phi_hidden_size if None)")
+# --- End DeepOSet Specific Args ---
 parser.add_argument("--unfreeze_sensors", action="store_true")
 parser.add_argument("--use_lr_schedule", action="store_true", help="Enable learning rate scheduling for applicable models (e.g., DeepONet)")
 parser.add_argument("--lr_schedule_steps", type=int, nargs='+', default=[50000, 100000, 150000, 200000, 250000], help="List of steps (iterations) for LR decay milestones.")
 parser.add_argument("--lr_schedule_gammas", type=float, nargs='+', default=[0.2, 0.5, 0.2, 0.5, 0.2], help="List of multiplicative factors (gammas) for LR decay at each step.")
-parser.add_argument("--pos_encoding_type", type=str, default="mlp", choices=['mlp', 'sinusoidal'], help="Type of positional encoding for DeepOSet ('mlp' or 'sinusoidal')")
-parser.add_argument("--pos_encoding_max_freq", type=float, default=1000.0, help="Maximum frequency/scale for sinusoidal positional encoding in DeepOSet")
+parser.add_argument("--test_variable_sensors", action="store_true", help="If set, train with fixed source sensors (unless --unfreeze_sensors) and variable target queries, but test with variable source sensors and variable target queries.")
 
 args = parser.parse_args()
 assert args.model_type in ["SVD", "Eigen", "matrix", "deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn", "deeposet"]
@@ -166,6 +172,12 @@ if args.use_lr_schedule:
         parser.error("--lr_schedule_steps and --lr_schedule_gammas are required when --use_lr_schedule is set.")
     if len(args.lr_schedule_steps) != len(args.lr_schedule_gammas):
         parser.error("--lr_schedule_steps and --lr_schedule_gammas must have the same number of elements.")
+
+# Validate FiLM arguments if strategy is film
+if args.model_type == "deeposet" and args.encoding_strategy == "film":
+    # Positional encoding must be enabled for FiLM
+    # We can enforce this or rely on the check within DeepOSet.__init__
+    pass # DeepOSet init handles this check
 
 # hyper params
 epochs = args.epochs
@@ -391,20 +403,24 @@ elif args.model_type == "deeposet":
                      input_size_tgt=tgt_dataset.input_size[0],
                      output_size_tgt=tgt_dataset.output_size[0],
                      p=n_basis, # Use n_basis for latent dim 'p'
-                     # Use the new direct arguments for hidden sizes
+                     # Use the direct arguments for hidden sizes
                      phi_hidden_size=args.phi_hidden_size,
                      rho_hidden_size=args.rho_hidden_size,
                      trunk_hidden_size=args.trunk_hidden_size,
                      n_trunk_layers=n_layers, # Use n_layers for trunk layers
                      # activation_fn=torch.nn.ReLU, # Can add argument if needed
-                     # use_deeponet_bias=True # Can add argument if needed
+                     # use_deeponet_bias=True, # Can add argument if needed
                      # Pass the schedule parameters (could be None)
                      lr_schedule_steps=schedule_steps,
                      lr_schedule_gammas=schedule_gammas,
                      # Pass positional encoding arguments
-                     use_positional_encoding=True, # Assuming we always want it if using deeposet, could add flag if needed
+                     use_positional_encoding=True, # FiLM requires this, concatenate can optionally use it
                      pos_encoding_type=args.pos_encoding_type,
-                     pos_encoding_max_freq=args.pos_encoding_max_freq
+                     pos_encoding_dim=args.pos_encoding_dim,
+                     pos_encoding_max_freq=args.pos_encoding_max_freq,
+                     # Pass encoding strategy arguments
+                     encoding_strategy=args.encoding_strategy,
+                     film_modulation_dim=args.film_modulation_dim
                      ).to(device)
 else:
     raise ValueError(f"Unknown model type: {args.model_type}")
@@ -429,16 +445,16 @@ else:
 # writes all parameters and saves them
 params = {"seed": seed,
           "n_sensors": args.n_sensors,
-          "n_basis": n_basis, # This is 'p'
+          "n_basis": n_basis, # This is 'p' for DeepONet/DeepOSet
           "n_params": n_params,
-          "n_layers": n_layers, # This is 'n_trunk_layers'
-          # Store the specific hidden sizes used for DeepOSet
-          "phi_hidden_size": args.phi_hidden_size if args.model_type == "deeposet" else hidden_size,
-          "rho_hidden_size": args.rho_hidden_size if args.model_type == "deeposet" else hidden_size,
-          "trunk_hidden_size": args.trunk_hidden_size if args.model_type == "deeposet" else hidden_size,
+          "n_layers": n_layers, # Trunk layers for DeepONet/DeepOSet
+          # Store the specific hidden sizes used
+          "phi_hidden_size": args.phi_hidden_size if args.model_type == "deeposet" else (hidden_size if args.model_type != "matrix" else None),
+          "rho_hidden_size": args.rho_hidden_size if args.model_type == "deeposet" else (hidden_size if args.model_type != "matrix" else None),
+          "trunk_hidden_size": args.trunk_hidden_size if args.model_type == "deeposet" else (hidden_size if args.model_type != "matrix" else None),
           # "approximate_number_parameters": args.approximate_number_paramaters, # Less relevant now for DeepOSet
           "model_type": model_type,
-          "train_method": args.train_method,
+          "train_method": args.train_method if model_type in ["SVD", "Eigen", "matrix"] else None,
           "dataset_type": dataset_type,
           "transformation_type": transformation_type,
           "device": device,
@@ -446,7 +462,11 @@ params = {"seed": seed,
           "epochs": epochs,
           # Add DeepOSet specific positional encoding params
           "pos_encoding_type": args.pos_encoding_type if args.model_type == "deeposet" else None,
+          "pos_encoding_dim": args.pos_encoding_dim if args.model_type == "deeposet" else None,
           "pos_encoding_max_freq": args.pos_encoding_max_freq if args.model_type == "deeposet" and args.pos_encoding_type == 'sinusoidal' else None,
+          # Add DeepOSet encoding strategy params
+          "encoding_strategy": args.encoding_strategy if args.model_type == "deeposet" else None,
+          "film_modulation_dim": args.film_modulation_dim if args.model_type == "deeposet" and args.encoding_strategy == 'film' else None,
           }
 # Add LR schedule info only if the model has it and schedule was used
 if hasattr(model, 'initial_lr'):
@@ -458,6 +478,18 @@ if hasattr(model, 'lr_schedule_steps') and model.lr_schedule_steps is not None:
          params["lr_schedule_gammas"] = str(model.lr_schedule_gammas)
 
 os.makedirs(logdir, exist_ok=True)
+# Use model._param_string() if available (like in DeepOSet) for consistency
+if hasattr(model, '_param_string') and callable(model._param_string):
+    params_from_model = model._param_string()
+    # Update the main params dict, potentially overwriting some if names clash
+    # but ensuring model's internal view is saved.
+    params.update(params_from_model)
+    # Convert all values to string for saving, as _param_string already does
+    params = {k: str(v) for k, v in params.items()}
+else:
+    # Fallback for models without _param_string
+    params = {k: str(v) for k, v in params.items() if v is not None} # Ensure None is not saved directly
+
 torch.save(params, f"{logdir}/params.pth")
 
 # Save the command-line arguments as a JSON file

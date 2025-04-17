@@ -21,9 +21,13 @@ class DeepOSet(torch.nn.Module):
                  activation_fn=nn.ReLU, # Activation function
                  use_deeponet_bias=True, # Whether to use a bias term after the cross product
                  phi_output_size=128, # Output dimension of the phi network before aggregation (Default)
-                 initial_lr=1e-4,     # Initial learning rate
+                 initial_lr=5e-4,     # Initial learning rate
                  lr_schedule_steps=None, # Steps for LR decay (optional)
-                 lr_schedule_gammas=None # Multiplicative factor for each step (optional)
+                 lr_schedule_gammas=None, # Multiplicative factor for each step (optional)
+                 use_positional_encoding=True, # Flag to enable/disable positional encoding
+                 pos_encoding_dim=64, # Dimension for the positional encoding MLP output
+                 pos_encoding_type='mlp', # Type: 'mlp' or 'sinusoidal'
+                 pos_encoding_max_freq=1000.0 # Max frequency/scale for sinusoidal encoding
                  ):
         super().__init__()
 
@@ -32,6 +36,10 @@ class DeepOSet(torch.nn.Module):
         self.output_size_src = output_size_src
         self.input_size_tgt = input_size_tgt
         self.output_size_tgt = output_size_tgt
+        self.use_positional_encoding = use_positional_encoding
+        self.pos_encoding_dim = pos_encoding_dim if use_positional_encoding else 0
+        self.pos_encoding_type = pos_encoding_type if use_positional_encoding else None
+        self.pos_encoding_max_freq = pos_encoding_max_freq # Store max frequency/scale
 
         self.p = p
         self.phi_hidden_size = phi_hidden_size
@@ -58,9 +66,30 @@ class DeepOSet(torch.nn.Module):
                 self.lr_schedule_rates.append(current_lr)
 
         # --- Branch Network (Deep Sets) ---
-        # Phi network: processes individual (location, value) pairs
-        # Input dim: location_dim + value_dim
-        phi_input_dim = input_size_src + output_size_src
+        # Determine phi input dimension and setup encoding components
+        if self.use_positional_encoding:
+            phi_input_dim = self.pos_encoding_dim + output_size_src
+            if self.pos_encoding_type == 'mlp':
+                # Simple MLP to encode positions
+                self.pos_encoder_mlp = nn.Sequential(
+                    nn.Linear(input_size_src, self.pos_encoding_dim // 2),
+                    activation_fn(),
+                    nn.Linear(self.pos_encoding_dim // 2, self.pos_encoding_dim)
+                    # Consider adding LayerNorm or other activations if needed
+                )
+            elif self.pos_encoding_type == 'sinusoidal':
+                 # Ensure pos_encoding_dim is even and divisible by 2*input_size_src
+                if self.pos_encoding_dim % (2 * self.input_size_src) != 0:
+                     raise ValueError(f"For sinusoidal encoding, pos_encoding_dim ({self.pos_encoding_dim}) must be divisible by 2 * input_size_src ({2 * self.input_size_src}).")
+                self.pos_encoder_mlp = None # Not used for sinusoidal
+            else:
+                raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}. Choose 'mlp' or 'sinusoidal'.")
+        else:
+            self.pos_encoder_mlp = None
+            # Original input: raw position + sensor value
+            phi_input_dim = input_size_src + output_size_src
+
+        # Phi network: processes individual (encoded_location, value) or (location, value) pairs
         self.phi = nn.Sequential(
             nn.Linear(phi_input_dim, phi_hidden_size),
             activation_fn(),
@@ -106,6 +135,43 @@ class DeepOSet(torch.nn.Module):
         self.method = "deepOSet"
         self.average_function = None
 
+    def _sinusoidal_encoding(self, coords):
+        """Applies fixed sinusoidal encoding to coordinates."""
+        # coords shape: (batch_size, n_sensors, input_size_src)
+        # Output shape: (batch_size, n_sensors, pos_encoding_dim)
+
+        # Ensure pos_encoding_dim is divisible by 2*input_size_src (already checked in init)
+        dims_per_coord = self.pos_encoding_dim // self.input_size_src
+        half_dim = dims_per_coord // 2
+
+        # Frequency bands
+        # Shape: (half_dim,)
+        div_term = torch.exp(torch.arange(half_dim, device=coords.device) * -(torch.log(torch.tensor(self.pos_encoding_max_freq, device=coords.device)) / half_dim))
+
+        # Expand div_term for broadcasting: (1, 1, 1, half_dim)
+        div_term = div_term.view(1, 1, 1, half_dim)
+
+        # Expand coords for broadcasting: (batch, n_sensors, input_size_src, 1)
+        coords_expanded = coords.unsqueeze(-1)
+
+        # Calculate arguments for sin/cos: (batch, n_sensors, input_size_src, half_dim)
+        angles = coords_expanded * div_term
+
+        # Calculate sin and cos embeddings: (batch, n_sensors, input_size_src, half_dim)
+        sin_embed = torch.sin(angles)
+        cos_embed = torch.cos(angles)
+
+        # Interleave sin and cos and flatten the last two dimensions
+        # Shape: (batch, n_sensors, input_size_src, dims_per_coord)
+        encoding = torch.cat([sin_embed, cos_embed], dim=-1).view(
+            coords.shape[0], coords.shape[1], self.input_size_src, dims_per_coord
+        )
+
+        # Reshape to final desired dimension: (batch, n_sensors, pos_encoding_dim)
+        encoding = encoding.view(coords.shape[0], coords.shape[1], self.pos_encoding_dim)
+
+        return encoding
+
     def forward_branch(self, xs, us):
         """
         Forward pass for the Deep Sets Branch.
@@ -118,14 +184,38 @@ class DeepOSet(torch.nn.Module):
         batch_size = xs.shape[0]
         n_sensors = xs.shape[1]
 
-        # Concatenate location and value for each sensor
-        # Shape: (batch_size, n_sensors, input_size_src + output_size_src)
-        phi_input = torch.cat((xs, us), dim=2)
+        # --- Apply Positional Encoding if enabled ---
+        if self.use_positional_encoding:
+            if self.pos_encoding_type == 'mlp':
+                if self.pos_encoder_mlp is None:
+                    raise RuntimeError("Positional encoding type is 'mlp' but pos_encoder_mlp is not initialized.")
+                # Reshape xs for MLP: (batch * n_sensors, input_size_src)
+                xs_reshaped = xs.view(batch_size * n_sensors, self.input_size_src)
+                # Encode positions: (batch * n_sensors, pos_encoding_dim)
+                encoded_xs = self.pos_encoder_mlp(xs_reshaped)
+                # Reshape back: (batch, n_sensors, pos_encoding_dim)
+                encoded_xs = encoded_xs.view(batch_size, n_sensors, self.pos_encoding_dim)
+            elif self.pos_encoding_type == 'sinusoidal':
+                # Calculate sinusoidal encoding
+                # Shape: (batch_size, n_sensors, pos_encoding_dim)
+                encoded_xs = self._sinusoidal_encoding(xs)
+            else:
+                # This case should ideally be caught in __init__, but added for safety
+                raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}")
 
-        # Reshape for phi's Linear layer: (batch_size * n_sensors, input_size_src + output_size_src)
+            # Concatenate encoded location and value for each sensor
+            # Shape: (batch_size, n_sensors, pos_encoding_dim + output_size_src)
+            phi_input = torch.cat((encoded_xs, us), dim=2)
+        else:
+            # Original: Concatenate raw location and value
+            # Shape: (batch_size, n_sensors, input_size_src + output_size_src)
+            phi_input = torch.cat((xs, us), dim=2)
+        # --- End Positional Encoding ---
+
+        # Reshape for phi's Linear layer: (batch_size * n_sensors, phi_input_dim)
         phi_input_reshaped = phi_input.view(batch_size * n_sensors, -1)
 
-        # Apply phi to each (location, value) pair
+        # Apply phi to each (encoded_location, value) or (location, value) pair
         # Shape: (batch_size * n_sensors, phi_output_size)
         phi_output = self.phi(phi_input_reshaped)
 
@@ -135,7 +225,7 @@ class DeepOSet(torch.nn.Module):
 
         # Aggregate over the sensor dimension (dim=1) using mean pooling
         # Shape: (batch_size, phi_output_size)
-        aggregated = torch.mean(phi_output_reshaped, dim=1)
+        aggregated = torch.mean(phi_output_reshaped, dim=1) # <<< Could also try other pooling here (e.g., max, sum)
 
         # Apply rho to the aggregated representation
         # Shape: (batch_size, output_size_tgt * p)
@@ -301,5 +391,13 @@ class DeepOSet(torch.nn.Module):
             params["lr_schedule_steps"] = str(self.lr_schedule_steps)
         if self.lr_schedule_gammas is not None:
              params["lr_schedule_gammas"] = str(self.lr_schedule_gammas)
+        # Add positional encoding params
+        params["use_positional_encoding"] = self.use_positional_encoding
+        if self.use_positional_encoding:
+            params["pos_encoding_type"] = self.pos_encoding_type
+            params["pos_encoding_dim"] = self.pos_encoding_dim
+            if self.pos_encoding_type == 'sinusoidal':
+                params["pos_encoding_max_freq"] = self.pos_encoding_max_freq
         params = {k: str(v) for k, v in params.items()}
         return params
+# tot totoot to curururu

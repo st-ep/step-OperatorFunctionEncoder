@@ -71,7 +71,7 @@ class OperatorDataset(BaseDataset):
         # get target data
         # even for deeponet these xs are always random
         # but they may be frozen for deeponet_pod
-        if not self.freeze_xs:  # sample every time
+        if not self.freeze_xs:  # sample every time Change later to if not self.freeze_xs: 
             xs = self.sample_inputs(info, self.n_points_per_sample)
         elif self.frozen_xs is None:  # sample first time
             xs = self.sample_inputs(info, self.n_points_per_sample)

@@ -25,9 +25,11 @@ class DeepOSet(torch.nn.Module):
                  lr_schedule_steps=None, # Steps for LR decay (optional)
                  lr_schedule_gammas=None, # Multiplicative factor for each step (optional)
                  use_positional_encoding=True, # Flag to enable/disable positional encoding
-                 pos_encoding_dim=64, # Dimension for the positional encoding MLP output
+                 pos_encoding_dim=164, # Dimension for the positional encoding MLP output (concatenate) or sinusoidal input (film)
                  pos_encoding_type='mlp', # Type: 'mlp' or 'sinusoidal'
-                 pos_encoding_max_freq=1000.0 # Max frequency/scale for sinusoidal encoding
+                 pos_encoding_max_freq=1000.0, # Max frequency/scale for sinusoidal encoding
+                 encoding_strategy='concatenate', # 'concatenate' or 'film'
+                 film_modulation_dim=None # Dimension for FiLM modulation (defaults to phi_hidden_size)
                  ):
         super().__init__()
 
@@ -40,6 +42,9 @@ class DeepOSet(torch.nn.Module):
         self.pos_encoding_dim = pos_encoding_dim if use_positional_encoding else 0
         self.pos_encoding_type = pos_encoding_type if use_positional_encoding else None
         self.pos_encoding_max_freq = pos_encoding_max_freq # Store max frequency/scale
+        self.encoding_strategy = encoding_strategy
+        # Default film_modulation_dim to phi_hidden_size if not provided
+        self.film_modulation_dim = film_modulation_dim if film_modulation_dim is not None else phi_hidden_size
 
         self.p = p
         self.phi_hidden_size = phi_hidden_size
@@ -47,6 +52,12 @@ class DeepOSet(torch.nn.Module):
         self.rho_hidden_size = rho_hidden_size
         self.trunk_hidden_size = trunk_hidden_size
         self.n_trunk_layers = n_trunk_layers
+
+        # Validate encoding strategy
+        if self.encoding_strategy not in ['concatenate', 'film']:
+            raise ValueError("encoding_strategy must be 'concatenate' or 'film'")
+        if self.encoding_strategy == 'film' and not self.use_positional_encoding:
+            raise ValueError("FiLM encoding strategy requires use_positional_encoding=True")
 
         # Store LR schedule parameters
         self.initial_lr = initial_lr
@@ -66,37 +77,84 @@ class DeepOSet(torch.nn.Module):
                 self.lr_schedule_rates.append(current_lr)
 
         # --- Branch Network (Deep Sets) ---
-        # Determine phi input dimension and setup encoding components
-        if self.use_positional_encoding:
-            phi_input_dim = self.pos_encoding_dim + output_size_src
+        self.pos_encoder_mlp = None # For concatenate strategy with MLP encoding
+        self.film_pos_encoder = None # For film strategy (takes raw pos or sinusoidal feats)
+        self.u_projector = None # For film strategy
+
+        if self.encoding_strategy == 'concatenate':
+            # Determine phi input dimension and setup encoding components for concatenation
+            if self.use_positional_encoding:
+                phi_input_dim = self.pos_encoding_dim + output_size_src
+                if self.pos_encoding_type == 'mlp':
+                    # Simple MLP to encode positions - Added one more hidden layer
+                    self.pos_encoder_mlp = nn.Sequential(
+                        nn.Linear(input_size_src, self.pos_encoding_dim // 2),
+                        activation_fn(),
+                        # --- Added Layer ---
+                        nn.Linear(self.pos_encoding_dim // 2, self.pos_encoding_dim // 2),
+                        activation_fn(),
+                        # --- End Added Layer ---
+                        nn.Linear(self.pos_encoding_dim // 2, self.pos_encoding_dim)
+                        # Consider adding LayerNorm or other activations if needed
+                    )
+                elif self.pos_encoding_type == 'sinusoidal':
+                     # Ensure pos_encoding_dim is even and divisible by 2*input_size_src
+                    if self.pos_encoding_dim % (2 * self.input_size_src) != 0:
+                         raise ValueError(f"For sinusoidal encoding, pos_encoding_dim ({self.pos_encoding_dim}) must be divisible by 2 * input_size_src ({2 * self.input_size_src}).")
+                    # No separate encoder MLP needed here for concat, sinusoidal feats used directly
+                else:
+                    raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}. Choose 'mlp' or 'sinusoidal'.")
+            else:
+                # Original input: raw position + sensor value
+                phi_input_dim = input_size_src + output_size_src
+
+            # Phi network: processes concatenated (encoded_location, value) or (location, value) pairs
+            self.phi = nn.Sequential(
+                nn.Linear(phi_input_dim, phi_hidden_size),
+                activation_fn(),
+                nn.Linear(phi_hidden_size, phi_hidden_size),
+                activation_fn(),
+                nn.Linear(phi_hidden_size, phi_output_size)
+            )
+
+        elif self.encoding_strategy == 'film':
+            # Setup components for FiLM
+            self.u_projector = nn.Linear(output_size_src, self.film_modulation_dim)
+
+            film_encoder_input_dim = 0
             if self.pos_encoding_type == 'mlp':
-                # Simple MLP to encode positions
-                self.pos_encoder_mlp = nn.Sequential(
-                    nn.Linear(input_size_src, self.pos_encoding_dim // 2),
-                    activation_fn(),
-                    nn.Linear(self.pos_encoding_dim // 2, self.pos_encoding_dim)
-                    # Consider adding LayerNorm or other activations if needed
-                )
+                # FiLM encoder takes raw position and outputs gamma/beta
+                film_encoder_input_dim = input_size_src
             elif self.pos_encoding_type == 'sinusoidal':
-                 # Ensure pos_encoding_dim is even and divisible by 2*input_size_src
+                # Ensure pos_encoding_dim is valid for sinusoidal
                 if self.pos_encoding_dim % (2 * self.input_size_src) != 0:
                      raise ValueError(f"For sinusoidal encoding, pos_encoding_dim ({self.pos_encoding_dim}) must be divisible by 2 * input_size_src ({2 * self.input_size_src}).")
-                self.pos_encoder_mlp = None # Not used for sinusoidal
+                # FiLM encoder takes sinusoidal features and outputs gamma/beta
+                film_encoder_input_dim = self.pos_encoding_dim
             else:
-                raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}. Choose 'mlp' or 'sinusoidal'.")
-        else:
-            self.pos_encoder_mlp = None
-            # Original input: raw position + sensor value
-            phi_input_dim = input_size_src + output_size_src
+                 raise ValueError(f"Unknown pos_encoding_type for FiLM: {self.pos_encoding_type}")
 
-        # Phi network: processes individual (encoded_location, value) or (location, value) pairs
-        self.phi = nn.Sequential(
-            nn.Linear(phi_input_dim, phi_hidden_size),
-            activation_fn(),
-            nn.Linear(phi_hidden_size, phi_hidden_size),
-            activation_fn(),
-            nn.Linear(phi_hidden_size, phi_output_size)
-        )
+            # MLP to generate FiLM parameters (gamma, beta) from positional features
+            # Output size is 2 * film_modulation_dim (for gamma and beta)
+            self.film_pos_encoder = nn.Sequential(
+                nn.Linear(film_encoder_input_dim, phi_hidden_size), # Input layer
+                activation_fn(),
+                nn.Linear(phi_hidden_size, phi_hidden_size), # Added hidden layer
+                activation_fn(),                             # Added activation
+                nn.Linear(phi_hidden_size, 2 * self.film_modulation_dim) # Output layer
+            )
+
+            # Phi network (core): processes the modulated sensor value 'u'
+            # Input dim is film_modulation_dim (output of FiLM)
+            # Output dim is phi_output_size
+            self.phi = nn.Sequential(
+                # The FiLM operation effectively acts as the first transformation
+                nn.Linear(self.film_modulation_dim, phi_hidden_size), # First hidden layer
+                activation_fn(),
+                nn.Linear(phi_hidden_size, phi_hidden_size), # Second hidden layer
+                activation_fn(),
+                nn.Linear(phi_hidden_size, phi_output_size) # Output layer
+            )
 
         # Rho network: processes aggregated representation from phi
         # Input dim: phi_output_size (after aggregation)
@@ -184,39 +242,76 @@ class DeepOSet(torch.nn.Module):
         batch_size = xs.shape[0]
         n_sensors = xs.shape[1]
 
-        # --- Apply Positional Encoding if enabled ---
-        if self.use_positional_encoding:
-            if self.pos_encoding_type == 'mlp':
-                if self.pos_encoder_mlp is None:
-                    raise RuntimeError("Positional encoding type is 'mlp' but pos_encoder_mlp is not initialized.")
-                # Reshape xs for MLP: (batch * n_sensors, input_size_src)
-                xs_reshaped = xs.view(batch_size * n_sensors, self.input_size_src)
-                # Encode positions: (batch * n_sensors, pos_encoding_dim)
-                encoded_xs = self.pos_encoder_mlp(xs_reshaped)
-                # Reshape back: (batch, n_sensors, pos_encoding_dim)
-                encoded_xs = encoded_xs.view(batch_size, n_sensors, self.pos_encoding_dim)
-            elif self.pos_encoding_type == 'sinusoidal':
-                # Calculate sinusoidal encoding
-                # Shape: (batch_size, n_sensors, pos_encoding_dim)
-                encoded_xs = self._sinusoidal_encoding(xs)
+        # Reshape inputs for element-wise processing
+        # Shape: (batch * n_sensors, *)
+        xs_reshaped = xs.view(batch_size * n_sensors, self.input_size_src)
+        us_reshaped = us.view(batch_size * n_sensors, self.output_size_src)
+
+        phi_input_reshaped = None
+
+        # --- Apply Encoding Strategy ---
+        if self.encoding_strategy == 'concatenate':
+            encoded_xs = None
+            if self.use_positional_encoding:
+                if self.pos_encoding_type == 'mlp':
+                    if self.pos_encoder_mlp is None:
+                        raise RuntimeError("Encoding strategy is 'concatenate' with 'mlp' but pos_encoder_mlp is not initialized.")
+                    # Encode positions: (batch * n_sensors, pos_encoding_dim)
+                    encoded_xs = self.pos_encoder_mlp(xs_reshaped)
+                elif self.pos_encoding_type == 'sinusoidal':
+                    # Calculate sinusoidal encoding: (batch, n_sensors, pos_encoding_dim)
+                    encoded_xs_full = self._sinusoidal_encoding(xs)
+                    # Reshape: (batch * n_sensors, pos_encoding_dim)
+                    encoded_xs = encoded_xs_full.view(batch_size * n_sensors, self.pos_encoding_dim)
+                else:
+                    raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}")
+
+                # Concatenate encoded location and value
+                # Shape: (batch * n_sensors, pos_encoding_dim + output_size_src)
+                phi_input_reshaped = torch.cat((encoded_xs, us_reshaped), dim=1)
             else:
-                # This case should ideally be caught in __init__, but added for safety
-                raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}")
+                # Original: Concatenate raw location and value
+                # Shape: (batch * n_sensors, input_size_src + output_size_src)
+                phi_input_reshaped = torch.cat((xs_reshaped, us_reshaped), dim=1)
 
-            # Concatenate encoded location and value for each sensor
-            # Shape: (batch_size, n_sensors, pos_encoding_dim + output_size_src)
-            phi_input = torch.cat((encoded_xs, us), dim=2)
+        elif self.encoding_strategy == 'film':
+            if self.film_pos_encoder is None or self.u_projector is None:
+                 raise RuntimeError("Encoding strategy is 'film' but FiLM components are not initialized.")
+
+            pos_features_reshaped = None
+            if self.pos_encoding_type == 'mlp':
+                # Use raw positions as input to the FiLM parameter generator
+                pos_features_reshaped = xs_reshaped
+            elif self.pos_encoding_type == 'sinusoidal':
+                # Calculate sinusoidal encoding first
+                # Shape: (batch, n_sensors, pos_encoding_dim)
+                encoded_xs_full = self._sinusoidal_encoding(xs)
+                # Reshape: (batch * n_sensors, pos_encoding_dim)
+                pos_features_reshaped = encoded_xs_full.view(batch_size * n_sensors, self.pos_encoding_dim)
+
+            # Generate FiLM parameters (gamma, beta)
+            # Shape: (batch * n_sensors, 2 * film_modulation_dim)
+            gamma_beta = self.film_pos_encoder(pos_features_reshaped)
+            # Split into gamma and beta
+            # Shape: (batch * n_sensors, film_modulation_dim) each
+            gamma, beta = torch.split(gamma_beta, self.film_modulation_dim, dim=1)
+
+            # Project sensor values 'u'
+            # Shape: (batch * n_sensors, film_modulation_dim)
+            u_proj = self.u_projector(us_reshaped)
+
+            # Apply FiLM: modulated_u = gamma * u_proj + beta
+            # Shape: (batch * n_sensors, film_modulation_dim)
+            phi_input_reshaped = gamma * u_proj + beta
+
         else:
-            # Original: Concatenate raw location and value
-            # Shape: (batch_size, n_sensors, input_size_src + output_size_src)
-            phi_input = torch.cat((xs, us), dim=2)
-        # --- End Positional Encoding ---
+            raise ValueError(f"Unknown encoding_strategy: {self.encoding_strategy}")
+        # --- End Encoding Strategy ---
 
-        # Reshape for phi's Linear layer: (batch_size * n_sensors, phi_input_dim)
-        phi_input_reshaped = phi_input.view(batch_size * n_sensors, -1)
 
-        # Apply phi to each (encoded_location, value) or (location, value) pair
-        # Shape: (batch_size * n_sensors, phi_output_size)
+        # Apply phi network (or phi_core for FiLM)
+        # Input shape: (batch_size * n_sensors, phi_input_dim or film_modulation_dim)
+        # Output shape: (batch_size * n_sensors, phi_output_size)
         phi_output = self.phi(phi_input_reshaped)
 
         # Reshape back for aggregation
@@ -398,6 +493,11 @@ class DeepOSet(torch.nn.Module):
             params["pos_encoding_dim"] = self.pos_encoding_dim
             if self.pos_encoding_type == 'sinusoidal':
                 params["pos_encoding_max_freq"] = self.pos_encoding_max_freq
+        # Add encoding strategy params
+        params["encoding_strategy"] = self.encoding_strategy
+        if self.encoding_strategy == 'film':
+            params["film_modulation_dim"] = self.film_modulation_dim
+
         params = {k: str(v) for k, v in params.items()}
         return params
 # tot totoot to curururu
