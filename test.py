@@ -150,14 +150,23 @@ parser.add_argument("--trunk_hidden_size", type=int, default=256, help="Hidden s
 parser.add_argument("--pos_encoding_type", type=str, default="mlp", choices=['mlp', 'sinusoidal'], help="Type of positional encoding for DeepOSet ('mlp' or 'sinusoidal')")
 parser.add_argument("--pos_encoding_dim", type=int, default=64, help="Dimension for MLP positional encoding output (concatenate) or sinusoidal features (film)")
 parser.add_argument("--pos_encoding_max_freq", type=float, default=100.0, help="Maximum frequency/scale for sinusoidal positional encoding in DeepOSet") # Make this 10.0
-parser.add_argument("--encoding_strategy", type=str, default="concatenate", choices=['concatenate', 'film'], help="Encoding strategy for DeepOSet branch ('concatenate' or 'film')")
+parser.add_argument("--encoding_strategy", type=str, default="concatenate", 
+                   choices=['concatenate', 'film', 'function_encoder'], 
+                   help="Encoding strategy for DeepOSet branch ('concatenate', 'film', or 'function_encoder')")
 parser.add_argument("--film_modulation_dim", type=int, default=None, help="Modulation dimension for FiLM strategy (defaults to phi_hidden_size if None)")
+parser.add_argument("--phi_output_size", type=int, default=64, 
+                   help="Output dimension of the phi network in DeepOSet before aggregation")
 # --- End DeepOSet Specific Args ---
 parser.add_argument("--unfreeze_sensors", action="store_true")
 parser.add_argument("--use_lr_schedule", action="store_true", help="Enable learning rate scheduling for applicable models (e.g., DeepONet)")
 parser.add_argument("--lr_schedule_steps", type=int, nargs='+', default=[50000, 100000, 150000, 200000, 250000], help="List of steps (iterations) for LR decay milestones.")
 parser.add_argument("--lr_schedule_gammas", type=float, nargs='+', default=[0.2, 0.5, 0.2, 0.5, 0.2], help="List of multiplicative factors (gammas) for LR decay at each step.")
 parser.add_argument("--test_variable_sensors", action="store_true", help="If set, train with fixed source sensors (unless --unfreeze_sensors) and variable target queries, but test with variable source sensors and variable target queries.")
+parser.add_argument("--fe_model_path", type=str, default="logs/cubic_source_only/least_squares/shared_model/2025-04-17_12-34-08/model.pth", help="Path to pretrained function encoder model")
+parser.add_argument("--fe_n_basis", type=int, default=11, help="Number of basis functions for function encoder")
+parser.add_argument("--fe_concat_mode", type=str, default='concat_u', choices=['replace', 'concat_u', 'concat_x'], 
+                    help="How to combine function encoder representations with inputs")
+parser.add_argument("--fe_arch", type=str, default="MLP", help="Architecture for function encoder")
 
 args = parser.parse_args()
 assert args.model_type in ["SVD", "Eigen", "matrix", "deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn", "deeposet"]
@@ -249,6 +258,46 @@ if args.model_type != "deeposet": # Calculate only if NOT deeposet
     )
 else:
     hidden_size = None # Not used directly for DeepOSet instantiation anymore
+
+# Add this function definition before the model initialization code
+
+def load_function_encoder(args):
+    """Load a pretrained function encoder model"""
+    if args.fe_model_path is None:
+        return None
+    
+    # Get shapes from the source dataset
+    if hasattr(src_dataset, 'input_size') and hasattr(src_dataset, 'output_size'):
+        fe_input_size = src_dataset.input_size
+        fe_output_size = src_dataset.output_size
+    else:
+        # Default to 1D if shapes not available directly
+        fe_input_size = (args.input_size_src,)
+        fe_output_size = (args.output_size_src,)
+    
+    # Create FunctionEncoder with same architecture as trained model
+    function_encoder = FunctionEncoder(
+        input_size=fe_input_size,
+        output_size=fe_output_size,
+        data_type="deterministic",
+        n_basis=args.fe_n_basis,
+        model_type=args.fe_arch,
+        method="least_squares"
+    ).to(device)
+    
+    # Load pre-trained weights
+    if os.path.exists(args.fe_model_path):
+        function_encoder.load_state_dict(torch.load(args.fe_model_path))
+        print(f"Loaded function encoder from {args.fe_model_path}")
+        
+        # Freeze the function encoder parameters
+        for param in function_encoder.parameters():
+            param.requires_grad = False
+        print("Function encoder parameters frozen")
+    else:
+        print(f"Warning: Function encoder model path {args.fe_model_path} not found. Using untrained model.")
+    
+    return function_encoder
 
 # create the model
 if args.model_type == "SVD" or args.model_type == "Eigen":
@@ -398,30 +447,23 @@ elif args.model_type == "deeposet":
     schedule_steps = args.lr_schedule_steps if args.use_lr_schedule else None
     schedule_gammas = args.lr_schedule_gammas if args.use_lr_schedule else None
 
-    model = DeepOSet(input_size_src=src_dataset.input_size[0],
-                     output_size_src=src_dataset.output_size[0],
-                     input_size_tgt=tgt_dataset.input_size[0],
-                     output_size_tgt=tgt_dataset.output_size[0],
-                     p=n_basis, # Use n_basis for latent dim 'p'
-                     # Use the direct arguments for hidden sizes
-                     phi_hidden_size=args.phi_hidden_size,
-                     rho_hidden_size=args.rho_hidden_size,
-                     trunk_hidden_size=args.trunk_hidden_size,
-                     n_trunk_layers=n_layers, # Use n_layers for trunk layers
-                     # activation_fn=torch.nn.ReLU, # Can add argument if needed
-                     # use_deeponet_bias=True, # Can add argument if needed
-                     # Pass the schedule parameters (could be None)
-                     lr_schedule_steps=schedule_steps,
-                     lr_schedule_gammas=schedule_gammas,
-                     # Pass positional encoding arguments
-                     use_positional_encoding=True, # FiLM requires this, concatenate can optionally use it
-                     pos_encoding_type=args.pos_encoding_type,
-                     pos_encoding_dim=args.pos_encoding_dim,
-                     pos_encoding_max_freq=args.pos_encoding_max_freq,
-                     # Pass encoding strategy arguments
-                     encoding_strategy=args.encoding_strategy,
-                     film_modulation_dim=args.film_modulation_dim
-                     ).to(device)
+    model = DeepOSet(
+        input_size_src=src_dataset.input_size[0],
+        output_size_src=src_dataset.output_size[0],
+        input_size_tgt=tgt_dataset.input_size[0],
+        output_size_tgt=tgt_dataset.output_size[0],
+        p=n_basis,
+        trunk_hidden_size=args.trunk_hidden_size,
+        phi_hidden_size=args.phi_hidden_size,
+        rho_hidden_size=args.rho_hidden_size,
+        phi_output_size=args.phi_output_size,
+        # Use the user-specified encoding strategy directly
+        encoding_strategy=args.encoding_strategy,
+        fe_n_basis=args.fe_n_basis,
+        fe_concat_mode=args.fe_concat_mode,
+        fe_arch=args.fe_arch,
+        function_encoder_model=load_function_encoder(args) if args.encoding_strategy == 'function_encoder' else None,
+    ).to(device)
 else:
     raise ValueError(f"Unknown model type: {args.model_type}")
 

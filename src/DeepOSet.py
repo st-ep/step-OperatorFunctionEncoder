@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from FunctionEncoder import BaseDataset, BaseCallback # Assuming these are defined elsewhere
+from FunctionEncoder import BaseDataset, BaseCallback, FunctionEncoder # Added FunctionEncoder import
 from tqdm import trange
 from torch.optim.lr_scheduler import _LRScheduler # Import base class for type hinting if needed
 
@@ -25,11 +25,16 @@ class DeepOSet(torch.nn.Module):
                  lr_schedule_steps=None, # Steps for LR decay (optional)
                  lr_schedule_gammas=None, # Multiplicative factor for each step (optional)
                  use_positional_encoding=True, # Flag to enable/disable positional encoding
-                 pos_encoding_dim=164, # Dimension for the positional encoding MLP output (concatenate) or sinusoidal input (film)
+                 pos_encoding_dim=64, # Dimension for the positional encoding MLP output (concatenate) or sinusoidal input (film)
                  pos_encoding_type='mlp', # Type: 'mlp' or 'sinusoidal'
                  pos_encoding_max_freq=1000.0, # Max frequency/scale for sinusoidal encoding
                  encoding_strategy='concatenate', # 'concatenate' or 'film'
-                 film_modulation_dim=None # Dimension for FiLM modulation (defaults to phi_hidden_size)
+                 film_modulation_dim=None, # Dimension for FiLM modulation (defaults to phi_hidden_size)
+                 # New parameters for function encoder integration
+                 function_encoder_model=None,
+                 fe_n_basis=11,
+                 fe_concat_mode='concat_u',  # 'replace', 'concat_u', or 'concat_x'
+                 fe_arch="MLP"
                  ):
         super().__init__()
 
@@ -53,9 +58,15 @@ class DeepOSet(torch.nn.Module):
         self.trunk_hidden_size = trunk_hidden_size
         self.n_trunk_layers = n_trunk_layers
 
+        # Add the new function encoder parameters
+        self.function_encoder_model = function_encoder_model
+        self.fe_n_basis = fe_n_basis
+        self.fe_concat_mode = fe_concat_mode
+        self.fe_arch = fe_arch
+
         # Validate encoding strategy
-        if self.encoding_strategy not in ['concatenate', 'film']:
-            raise ValueError("encoding_strategy must be 'concatenate' or 'film'")
+        if self.encoding_strategy not in ['concatenate', 'film', 'function_encoder']:
+            raise ValueError("encoding_strategy must be 'concatenate', 'film', or 'function_encoder'")
         if self.encoding_strategy == 'film' and not self.use_positional_encoding:
             raise ValueError("FiLM encoding strategy requires use_positional_encoding=True")
 
@@ -156,6 +167,29 @@ class DeepOSet(torch.nn.Module):
                 nn.Linear(phi_hidden_size, phi_output_size) # Output layer
             )
 
+        elif self.encoding_strategy == 'function_encoder':
+            # Determine phi input dimension based on concat mode
+            if self.fe_concat_mode == 'replace':
+                # Just use the coefficients
+                phi_input_dim = self.fe_n_basis
+            elif self.fe_concat_mode == 'concat_u':
+                # Concatenate coefficients with function values
+                phi_input_dim = self.fe_n_basis + output_size_src
+            elif self.fe_concat_mode == 'concat_x':
+                # Concatenate coefficients with positions
+                phi_input_dim = self.fe_n_basis + input_size_src
+            else:
+                raise ValueError(f"Unknown fe_concat_mode: {self.fe_concat_mode}")
+                
+            # Create phi network for function encoder mode
+            self.phi = nn.Sequential(
+                nn.Linear(phi_input_dim, phi_hidden_size),
+                activation_fn(),
+                nn.Linear(phi_hidden_size, phi_hidden_size),
+                activation_fn(),
+                nn.Linear(phi_hidden_size, phi_output_size)
+            )
+
         # Rho network: processes aggregated representation from phi
         # Input dim: phi_output_size (after aggregation)
         self.rho = nn.Sequential(
@@ -192,6 +226,21 @@ class DeepOSet(torch.nn.Module):
         # holdovers from function encoder code, these do nothing
         self.method = "deepOSet"
         self.average_function = None
+
+        # Initialize function encoder if needed
+        if self.encoding_strategy == 'function_encoder' and self.function_encoder_model is None:
+            # Create a new function encoder if one wasn't provided
+            self.function_encoder_model = FunctionEncoder(
+                input_size=(input_size_src,),
+                output_size=(output_size_src,),
+                data_type="deterministic",
+                n_basis=self.fe_n_basis,
+                model_type=self.fe_arch,
+                method="least_squares"
+            ).to(next(self.parameters()).device)
+            # Freeze the function encoder if it's pre-trained
+            # for param in self.function_encoder_model.parameters():
+            #     param.requires_grad = False
 
     def _sinusoidal_encoding(self, coords):
         """Applies fixed sinusoidal encoding to coordinates."""
@@ -304,10 +353,54 @@ class DeepOSet(torch.nn.Module):
             # Shape: (batch * n_sensors, film_modulation_dim)
             phi_input_reshaped = gamma * u_proj + beta
 
+        elif self.encoding_strategy == 'function_encoder':
+            # Compute the function encoder representation for each batch
+            fe_representations = []
+            
+            # Process each batch item separately since we need to compute representations per function
+            for b in range(batch_size):
+                batch_xs = xs[b]  # Shape: (n_sensors, input_size_src)
+                batch_us = us[b]  # Shape: (n_sensors, output_size_src)
+                
+                # Compute representation using function encoder
+                representation, _ = self.function_encoder_model.compute_representation(
+                    batch_xs.unsqueeze(0),  # Add batch dimension
+                    batch_us.unsqueeze(0),  # Add batch dimension
+                    method="least_squares"
+                )
+                
+                # Ensure representation has the expected shape (n_basis,) or (1, n_basis)
+                if len(representation.shape) > 1:
+                    representation = representation.squeeze()  # Remove any extra dimensions
+                
+                # Store representation for this batch
+                fe_representations.append(representation)
+            
+            # Stack representations - now each item should be properly shaped
+            fe_representations = torch.stack(fe_representations)  # Shape: (batch_size, n_basis)
+            
+            # Repeat representation for each sensor point - we need to expand properly
+            # Shape: (batch_size, n_sensors, n_basis)
+            fe_representations_expanded = fe_representations.unsqueeze(1).expand(-1, n_sensors, -1)
+            
+            # Reshape to match phi input shape
+            # Shape: (batch_size * n_sensors, n_basis)
+            fe_representations_reshaped = fe_representations_expanded.reshape(batch_size * n_sensors, self.fe_n_basis)
+            
+            # Prepare phi input based on concat mode
+            if self.fe_concat_mode == 'replace':
+                # Just use the coefficients
+                phi_input_reshaped = fe_representations_reshaped
+            elif self.fe_concat_mode == 'concat_u':
+                # Concatenate coefficients with function values
+                phi_input_reshaped = torch.cat((fe_representations_reshaped, us_reshaped), dim=1)
+            elif self.fe_concat_mode == 'concat_x':
+                # Concatenate coefficients with positions
+                phi_input_reshaped = torch.cat((fe_representations_reshaped, xs_reshaped), dim=1)
+        
         else:
             raise ValueError(f"Unknown encoding_strategy: {self.encoding_strategy}")
         # --- End Encoding Strategy ---
-
 
         # Apply phi network (or phi_core for FiLM)
         # Input shape: (batch_size * n_sensors, phi_input_dim or film_modulation_dim)
@@ -497,6 +590,11 @@ class DeepOSet(torch.nn.Module):
         params["encoding_strategy"] = self.encoding_strategy
         if self.encoding_strategy == 'film':
             params["film_modulation_dim"] = self.film_modulation_dim
+        # Add function encoder params
+        if self.encoding_strategy == 'function_encoder':
+            params["fe_n_basis"] = self.fe_n_basis
+            params["fe_concat_mode"] = self.fe_concat_mode
+            params["fe_arch"] = self.fe_arch
 
         params = {k: str(v) for k, v in params.items()}
         return params
