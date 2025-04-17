@@ -2,6 +2,7 @@ from datetime import datetime
 
 import matplotlib.pyplot as plt
 import torch
+import json
 
 from FunctionEncoder import TensorboardCallback, FunctionEncoder
 
@@ -141,11 +142,16 @@ parser.add_argument("--dataset_type", type=str, default="Derivative")
 parser.add_argument("--logdir", type=str, default="logs")
 parser.add_argument("--device", type=str, default="auto")
 parser.add_argument("--n_layers", type=int, default=4)
-parser.add_argument("--approximate_number_paramaters", type=int, default=500_000)
+parser.add_argument("--approximate_number_paramaters", type=int, default=300_000)
 parser.add_argument("--phi_hidden_size", type=int, default=256, help="Hidden size for DeepOSet phi network")
 parser.add_argument("--rho_hidden_size", type=int, default=256, help="Hidden size for DeepOSet rho network")
 parser.add_argument("--trunk_hidden_size", type=int, default=256, help="Hidden size for DeepOSet trunk network")
 parser.add_argument("--unfreeze_sensors", action="store_true")
+parser.add_argument("--use_lr_schedule", action="store_true", help="Enable learning rate scheduling for applicable models (e.g., DeepONet)")
+parser.add_argument("--lr_schedule_steps", type=int, nargs='+', default=[50000, 100000, 150000, 200000, 250000], help="List of steps (iterations) for LR decay milestones.")
+parser.add_argument("--lr_schedule_gammas", type=float, nargs='+', default=[0.2, 0.5, 0.2, 0.5, 0.2], help="List of multiplicative factors (gammas) for LR decay at each step.")
+parser.add_argument("--pos_encoding_type", type=str, default="mlp", choices=['mlp', 'sinusoidal'], help="Type of positional encoding for DeepOSet ('mlp' or 'sinusoidal')")
+parser.add_argument("--pos_encoding_max_freq", type=float, default=1000.0, help="Maximum frequency/scale for sinusoidal positional encoding in DeepOSet")
 
 args = parser.parse_args()
 assert args.model_type in ["SVD", "Eigen", "matrix", "deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn", "deeposet"]
@@ -153,6 +159,13 @@ assert args.dataset_type in ["QuadraticSin", "Derivative", "Integral",  "Elastic
 
 # cancel bad combinations
 check_parameters(args)
+
+# Validate LR schedule arguments if schedule is used
+if args.use_lr_schedule:
+    if not args.lr_schedule_steps or not args.lr_schedule_gammas:
+        parser.error("--lr_schedule_steps and --lr_schedule_gammas are required when --use_lr_schedule is set.")
+    if len(args.lr_schedule_steps) != len(args.lr_schedule_gammas):
+        parser.error("--lr_schedule_steps and --lr_schedule_gammas must have the same number of elements.")
 
 # hyper params
 epochs = args.epochs
@@ -352,6 +365,10 @@ elif args.model_type == "deeponet_2stage_cnn":
 
 
 elif args.model_type == "deeponet":
+    # Conditionally set schedule parameters based on the flag
+    schedule_steps = args.lr_schedule_steps if args.use_lr_schedule else None
+    schedule_gammas = args.lr_schedule_gammas if args.use_lr_schedule else None
+
     model = DeepONet(input_size_tgt=tgt_dataset.input_size[0],
                      output_size_tgt=tgt_dataset.output_size[0],
                      input_size_src=src_dataset.input_size[0],
@@ -360,8 +377,15 @@ elif args.model_type == "deeponet":
                      p=n_basis,
                      n_layers=n_layers,
                      hidden_size=hidden_size,
+                     # Pass the schedule parameters (could be None)
+                     lr_schedule_steps=schedule_steps,
+                     lr_schedule_gammas=schedule_gammas
                      ).to(device)
 elif args.model_type == "deeposet":
+    # Conditionally set schedule parameters based on the flag
+    schedule_steps = args.lr_schedule_steps if args.use_lr_schedule else None
+    schedule_gammas = args.lr_schedule_gammas if args.use_lr_schedule else None
+
     model = DeepOSet(input_size_src=src_dataset.input_size[0],
                      output_size_src=src_dataset.output_size[0],
                      input_size_tgt=tgt_dataset.input_size[0],
@@ -374,6 +398,13 @@ elif args.model_type == "deeposet":
                      n_trunk_layers=n_layers, # Use n_layers for trunk layers
                      # activation_fn=torch.nn.ReLU, # Can add argument if needed
                      # use_deeponet_bias=True # Can add argument if needed
+                     # Pass the schedule parameters (could be None)
+                     lr_schedule_steps=schedule_steps,
+                     lr_schedule_gammas=schedule_gammas,
+                     # Pass positional encoding arguments
+                     use_positional_encoding=True, # Assuming we always want it if using deeposet, could add flag if needed
+                     pos_encoding_type=args.pos_encoding_type,
+                     pos_encoding_max_freq=args.pos_encoding_max_freq
                      ).to(device)
 else:
     raise ValueError(f"Unknown model type: {args.model_type}")
@@ -413,9 +444,28 @@ params = {"seed": seed,
           "device": device,
           "logdir": logdir,
           "epochs": epochs,
+          # Add DeepOSet specific positional encoding params
+          "pos_encoding_type": args.pos_encoding_type if args.model_type == "deeposet" else None,
+          "pos_encoding_max_freq": args.pos_encoding_max_freq if args.model_type == "deeposet" and args.pos_encoding_type == 'sinusoidal' else None,
           }
+# Add LR schedule info only if the model has it and schedule was used
+if hasattr(model, 'initial_lr'):
+    params["initial_lr"] = model.initial_lr
+if hasattr(model, 'lr_schedule_steps') and model.lr_schedule_steps is not None:
+     params["lr_schedule_steps"] = str(model.lr_schedule_steps)
+     # Check for gammas specifically
+     if hasattr(model, 'lr_schedule_gammas') and model.lr_schedule_gammas is not None:
+         params["lr_schedule_gammas"] = str(model.lr_schedule_gammas)
+
 os.makedirs(logdir, exist_ok=True)
 torch.save(params, f"{logdir}/params.pth")
+
+# Save the command-line arguments as a JSON file
+args_dict = vars(args) # Convert argparse Namespace to dictionary
+args_save_path = f"{logdir}/args.json"
+with open(args_save_path, 'w') as f:
+    json.dump(args_dict, f, indent=4)
+print(f"Saved command-line arguments to {args_save_path}")
 
 
 # train or load a model

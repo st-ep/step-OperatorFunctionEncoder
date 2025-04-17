@@ -169,8 +169,8 @@ def plot_transformation_derivative(example_xs, example_ys, example_y_hats, xs, y
         ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color="black")
         if example_y_hats is not None:
             ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
-        # Add scatter plot for sample points
-        ax.scatter(example_xs[row].cpu(), example_ys[row].cpu(), label="Sample Points", color='green', marker='o', s=50, zorder=5)
+        # Add scatter plot for every 20th sample point
+        ax.scatter(example_xs[row, ::20].cpu(), example_ys[row, ::20].cpu(), label="Sample Points", color='green', marker='o', s=50, zorder=5)
         title = f"${info['As'][row].item():.2f}x^3 + {info['Bs'][row].item():.2f}x^2 + {info['Cs'][row].item():.2f}x + {info['Ds'][row].item():.2f}$"
         ax.set_title(title)
         ax.legend() # Add legend to the first plot as well

@@ -1,7 +1,7 @@
-
 import torch
 from FunctionEncoder import BaseDataset, BaseCallback
 from tqdm import trange
+from torch.optim.lr_scheduler import _LRScheduler # Import base class for type hinting if needed
 
 
 # This implements an unstacked DeepONet
@@ -17,6 +17,9 @@ class DeepONet(torch.nn.Module):
                  use_deeponet_bias=True, # whether to use a bias term after the cross product in the deepnet.
                  hidden_size=256,
                  n_layers=4,
+                 initial_lr=5e-4,     # Initial learning rate (matches DeepOSet default)
+                 lr_schedule_steps=None, # Steps for LR decay (optional)
+                 lr_schedule_gammas=None # Multiplicative factor for each step (optional)
                  ):
         super().__init__()
 
@@ -29,6 +32,24 @@ class DeepONet(torch.nn.Module):
         self.n_input_sensors = n_input_sensors
         self.p = p
         self.hidden_size = hidden_size
+        self.n_layers = n_layers
+
+        # Store LR schedule parameters
+        self.initial_lr = initial_lr
+        self.lr_schedule_steps = None
+        self.lr_schedule_rates = None
+        self.lr_schedule_gammas = None # Store gammas as well
+        if lr_schedule_steps is not None:
+            if lr_schedule_gammas is None or len(lr_schedule_steps) != len(lr_schedule_gammas):
+                raise ValueError("lr_schedule_gammas must be provided and have the same length as lr_schedule_steps if scheduling is used.")
+            self.lr_schedule_steps = sorted(lr_schedule_steps) # Ensure steps are sorted
+            self.lr_schedule_gammas = lr_schedule_gammas # Store the provided gammas
+            # Calculate the actual learning rates at each step based on gammas
+            self.lr_schedule_rates = [initial_lr]
+            current_lr = initial_lr
+            for gamma in lr_schedule_gammas:
+                current_lr *= gamma
+                self.lr_schedule_rates.append(current_lr)
 
         # this maps u(x_1), u(x_2), ..., u(x_m) to b_1, b_2, ..., b_p
         layers_branch = []
@@ -54,8 +75,11 @@ class DeepONet(torch.nn.Module):
         # an optional bias, see equation 2 in the paper.
         self.bias = torch.nn.Parameter(torch.randn(output_size_tgt) * 0.1) if use_deeponet_bias else None
 
-        # create optimizer
-        self.opt = torch.optim.Adam(self.parameters(), lr=5e-6)
+        # create optimizer with the initial learning rate
+        self.opt = torch.optim.Adam(self.parameters(), lr=self.initial_lr)
+
+        # Initialize step counter for LR scheduling
+        self.total_steps = 0
 
         # holdovers from function encoder code, these do nothing
         self.method = "deepONet"
@@ -88,10 +112,39 @@ class DeepONet(torch.nn.Module):
 
         return G_u_y
 
+    def _get_current_lr(self):
+        """ Gets the learning rate based on the current total_steps. """
+        # If no schedule is defined, always return the initial LR
+        if self.lr_schedule_steps is None or self.lr_schedule_rates is None:
+            return self.initial_lr
+
+        lr = self.initial_lr
+        # Find the correct LR based on the number of steps completed
+        milestone_idx = -1
+        for i, step_milestone in enumerate(self.lr_schedule_steps):
+            if self.total_steps >= step_milestone:
+                milestone_idx = i
+            else:
+                break # Stop checking once we are below a milestone
+
+        # If we passed any milestones, use the corresponding rate
+        if milestone_idx != -1:
+             # +1 because lr_schedule_rates[0] is initial LR
+            lr = self.lr_schedule_rates[milestone_idx + 1]
+        return lr
+
+    def _update_lr(self):
+        """ Updates the optimizer's learning rate based on total_steps. """
+        new_lr = self._get_current_lr()
+        # Update learning rate for all parameter groups in the optimizer
+        for param_group in self.opt.param_groups:
+            param_group['lr'] = new_lr
+        return new_lr # Return the new LR for logging/display
+
     # This is the main training loop, kept consistent with the function encoder code.
     def train_model(self,
                     dataset: BaseDataset,
-                    epochs: int,
+                    epochs: int, # Note: This loop runs 'epochs' times, each is one step
                     progress_bar=True,
                     callback: BaseCallback = None):
         # set device
@@ -99,12 +152,17 @@ class DeepONet(torch.nn.Module):
 
         # Let callbacks few starting data
         if callback is not None:
+            # Pass initial state including the step counter if needed
             callback.on_training_start(locals())
 
 
         losses = []
+        # Treat 'epochs' here as the number of steps for this training call
         bar = trange(epochs) if progress_bar else range(epochs)
-        for epoch in bar:
+        for step_in_epoch in bar: # Renamed 'epoch' to 'step_in_epoch' for clarity
+            # Update Learning Rate based on total steps *before* optimizer step
+            current_lr = self._update_lr()
+
             # sample input data
             xs, u_xs, ys, G_u_ys, _ = dataset.sample(device=device)
 
@@ -122,8 +180,18 @@ class DeepONet(torch.nn.Module):
             norm = torch.nn.utils.clip_grad_norm_(self.parameters(), 1)
             self.opt.step()
 
+            # Increment total steps *after* optimizer step
+            self.total_steps += 1
+
+            # update progress bar
+            if progress_bar:
+                # Display current LR in the progress bar
+                bar.set_description(f"Step {self.total_steps} | Loss: {loss.item():.4e} | Grad Norm: {norm:.2f} | LR: {current_lr:.2e}")
+
+
             # callbacks
             if callback is not None:
+                # Pass current state including step counter and LR
                 callback.on_step(locals())
 
         # let callbacks know its done
@@ -141,6 +209,11 @@ class DeepONet(torch.nn.Module):
         params["p"] = self.p
         params["hidden_size"] = self.hidden_size
         params["use_deeponet_bias"] = self.bias is not None
+        params["initial_lr"] = self.initial_lr
+        if self.lr_schedule_steps is not None:
+            params["lr_schedule_steps"] = str(self.lr_schedule_steps)
+        if self.lr_schedule_gammas is not None:
+             params["lr_schedule_gammas"] = str(self.lr_schedule_gammas)
         params = {k: str(v) for k, v in params.items()}
         return params
 
