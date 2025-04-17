@@ -169,8 +169,8 @@ def plot_transformation_derivative(example_xs, example_ys, example_y_hats, xs, y
         ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color="black")
         if example_y_hats is not None:
             ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
-        # Add scatter plot for every 20th sample point in input space
-        ax.scatter(example_xs[row, ::50].cpu(), example_ys[row, ::50].cpu(), label="Sample Points", color='green', marker='o', s=50, zorder=5)
+        # Add scatter plot for every 50th sample point in the source plot
+        ax.scatter(example_xs[row, ::50].cpu(), example_ys[row, ::50].cpu(), label="Source Samples", color='green', marker='o', s=50, zorder=5)
         title = f"${info['As'][row].item():.2f}x^3 + {info['Bs'][row].item():.2f}x^2 + {info['Cs'][row].item():.2f}x + {info['Ds'][row].item():.2f}$"
         ax.set_title(title)
         ax.legend() # Add legend to the first plot as well
@@ -185,21 +185,16 @@ def plot_transformation_derivative(example_xs, example_ys, example_y_hats, xs, y
         # ax.set_ylim(-0.3, 0.3)
         # ax.axis("off")
 
-        # plot target function (derivative)
+        # plot target function
         ax = axs[1]
         ax.plot(xs[row].cpu(), ys[row].cpu(), label="Groundtruth", color="black")
         ax.plot(xs[row].cpu(), y_hats[row].cpu(), label=label, color=color)
-        # Add scatter plot for every 20th sample point in output space
-        # Note: We use the *source* function's example_xs and example_ys here
-        # to show where the input samples map to in the source function's output space.
-        # If you intended to plot the *target* function's outputs for these inputs,
-        # you would need to compute those separately or pass them in.
-        # Assuming you want to show the source function's output values at the sample points:
-        ax.scatter(example_xs[row, ::50].cpu(), example_ys[row, ::50].cpu(), label="Sample Points", color='green', marker='o', s=50, zorder=5)
+        # Add scatter plot for every 50th sample point in the target plot
+        ax.scatter(xs[row, ::500].cpu(), ys[row, ::500].cpu(), label="Target Samples", color='red', marker='x', s=50, zorder=5)
         title = f"$3*{info['As'][row].item():.2f}x^2 + 2*{info['Bs'][row].item():.2f}x + {info['Cs'][row].item():.2f}$"
         ax.set_title(title)
         ax.legend()
         plt.tight_layout()
         plot_name = f"{logdir}/qualitative_Derivative_{label.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')}_{row}.pdf"
         plt.savefig(plot_name)
-        plt.close(fig) # Close the figure to free memory
+        plt.close(fig) # Close the figure after saving to free up memory
