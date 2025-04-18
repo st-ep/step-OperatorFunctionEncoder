@@ -30,76 +30,85 @@ from src.Datasets.BurgerDataset import BurgerInputDataset, BurgerOutputDataset, 
 from src.Datasets.OperatorDataset import CombinedDataset
 
 
-def get_dataset(dataset_type:str, test:bool, model_type:str, n_sensors:int, device:str, freeze_example_xs:bool=True, **kwargs):
+def get_dataset(dataset_type:str, test:bool, model_type:str, n_sensors:int, device:str, freeze_example_xs_train:bool=True, test_variable_sensors:bool=False, no_copy_sensors_to_test:bool=False, **kwargs):
     # generate datasets
     # freeze_example_xs = model_type in ["deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn"]  # deeponet has fixed input sensors.
     # DeepOSet can handle varying sensors, but freeze by default like DeepONet for comparison unless overridden
+
+    # Determine freezing for the specific dataset being created (train or test)
+    if test:
+        # For the TEST dataset:
+        # Freeze source sensors ONLY IF training sensors were frozen AND we ARE copying sensors OR NOT testing variable sensors
+        current_freeze_example_xs = freeze_example_xs_train and not (test_variable_sensors and no_copy_sensors_to_test)
+    else:
+        # For the TRAIN dataset:
+        current_freeze_example_xs = freeze_example_xs_train
+
+    # Target query freezing depends only on model type (POD/2Stage freeze, others don't by default)
     freeze_xs = model_type in ["deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn"]
+
     # NOTE: Most of these datasets are generative, so the data is always unseen, hence no separate test set.
     if dataset_type == "QuadraticSin":
-        src_dataset = QuadraticDataset(freeze_example_xs=freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = QuadraticDataset(freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = SinDataset(n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     elif dataset_type == "Derivative":
-        src_dataset = CubicDataset(freeze_example_xs=freeze_example_xs, n_examples_per_sample=n_sensors, device=device, **kwargs)
+        src_dataset = CubicDataset(freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device, **kwargs)
         tgt_dataset = CubicDerivativeDataset(n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device, **kwargs)
     elif dataset_type == "Integral":
-        src_dataset = QuadraticDataset(freeze_example_xs=freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = QuadraticDataset(freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = QuadraticIntegralDataset(n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     elif dataset_type == "MountainCar":
-        src_dataset = MountainCarPoliciesDataset(freeze_example_xs=freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = MountainCarPoliciesDataset(freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = MountainCarEpisodesDataset(n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     elif dataset_type == "Elastic":
-        src_dataset = ElasticPlateBoudaryForceDataset(freeze_example_xs=freeze_example_xs, test=test, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = ElasticPlateBoudaryForceDataset(freeze_example_xs=current_freeze_example_xs, test=test, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = ElasticPlateDisplacementDataset(test=test, n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     elif dataset_type == "Darcy":
-        src_dataset = DarcySrcDataset(test=test, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = DarcySrcDataset(test=test, freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = DarcyTgtDataset(test=test, n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     elif dataset_type == "Heat":
-        src_dataset = HeatSrcDataset(test=test, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = HeatSrcDataset(test=test, freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = HeatTgtDataset(test=test, n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     elif dataset_type == "LShaped":
-        src_dataset = LSrcDataset(test=test, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = LSrcDataset(test=test, freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = LTgtDataset(test=test, n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     elif dataset_type == "Burger":
-        src_dataset = BurgerInputDataset(test=test, n_examples_per_sample=n_sensors, device=device)
+        src_dataset = BurgerInputDataset(test=test, freeze_example_xs=current_freeze_example_xs, n_examples_per_sample=n_sensors, device=device)
         tgt_dataset = BurgerOutputDataset(test=test, n_examples_per_sample=n_sensors, freeze_xs=freeze_xs, device=device)
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
     combined_dataset = CombinedDataset(src_dataset, tgt_dataset, calibration_only=(model_type == "matrix"))
 
-    # sample from all of them to freeze the example inputs, which only matters for deeponet.
-    src_dataset.sample(device)
-    tgt_dataset.sample(device)
-    combined_dataset.sample(device)
-
     return src_dataset, tgt_dataset, combined_dataset
 
 # test any model on a dataset
 def test(model,
-         combined_dataset:CombinedDataset,
+         testing_combined_dataset:CombinedDataset, # Renamed parameter for clarity
          callback:TensorboardCallback,
          transformation_type:str,
          train_method:str,
          model_type:str ):
     # set combined dataset to give us more testing data.
     if model_type == "matrix":
-        combined_dataset.calibration_only = False
+        # Ensure the testing dataset instance is used here too
+        testing_combined_dataset.calibration_only = False
 
     with torch.no_grad():
         num_trials = 10
         loss = 0
-        for test in range(num_trials):
-            # Get data
-            src_xs, src_ys, tgt_xs, tgt_ys, info = combined_dataset.sample(device)
+        for test_iter in range(num_trials): # Renamed loop variable
+            # Get data from the TESTING dataset
+            src_xs, src_ys, tgt_xs, tgt_ys, info = testing_combined_dataset.sample(device)
 
             # Compute y_hats for a given model type
             if model_type == "matrix":
 
                 # note the heat dataset has no source space, so the representation is simply alpha, temperature
-                if type(combined_dataset.src_dataset) == HeatSrcDataset:
+                # Use the testing dataset instance here
+                if type(testing_combined_dataset.src_dataset) == HeatSrcDataset:
                     src_Cs = src_ys[:, 0, :]
                 else: # otherwise we compute the representation from data.
-                    src_Cs, _ = model["src"].compute_representation(src_xs, src_ys, method=args.train_method)
+                    src_Cs, _ = model["src"].compute_representation(src_xs, src_ys, method=train_method) # Use args.train_method?
                 if transformation_type == "linear":
                     tgt_Cs_hat = src_Cs @ model["A"].T
                 else:
@@ -113,7 +122,7 @@ def test(model,
             elif model_type == "deeponet_2stage_cnn":
                 tgt_Cs_hat = (model["T"] @ model["A"](src_ys).T).T
                 tgt_y_hats = model["tgt"].predict(tgt_xs, tgt_Cs_hat)
-            else:
+            else: # deeponet*, deeposet
                 tgt_y_hats = model.forward(src_xs, src_ys, tgt_xs)
 
             # Compute loss
@@ -125,7 +134,8 @@ def test(model,
 
     # Set combined dataset back to training mode for matrix method
     if model_type == "matrix":
-        combined_dataset.calibration_only = True
+        # Use the testing dataset instance
+        testing_combined_dataset.calibration_only = True
 
 
 
@@ -154,7 +164,7 @@ parser.add_argument("--encoding_strategy", type=str, default="concatenate",
                    choices=['concatenate', 'film', 'function_encoder'], 
                    help="Encoding strategy for DeepOSet branch ('concatenate', 'film', or 'function_encoder')")
 parser.add_argument("--film_modulation_dim", type=int, default=None, help="Modulation dimension for FiLM strategy (defaults to phi_hidden_size if None)")
-parser.add_argument("--phi_output_size", type=int, default=64, 
+parser.add_argument("--phi_output_size", type=int, default=128, 
                    help="Output dimension of the phi network in DeepOSet before aggregation")
 # --- End DeepOSet Specific Args ---
 parser.add_argument("--unfreeze_sensors", action="store_true")
@@ -162,11 +172,13 @@ parser.add_argument("--use_lr_schedule", action="store_true", help="Enable learn
 parser.add_argument("--lr_schedule_steps", type=int, nargs='+', default=[50000, 100000, 150000, 200000, 250000], help="List of steps (iterations) for LR decay milestones.")
 parser.add_argument("--lr_schedule_gammas", type=float, nargs='+', default=[0.2, 0.5, 0.2, 0.5, 0.2], help="List of multiplicative factors (gammas) for LR decay at each step.")
 parser.add_argument("--test_variable_sensors", action="store_true", help="If set, train with fixed source sensors (unless --unfreeze_sensors) and variable target queries, but test with variable source sensors and variable target queries.")
-parser.add_argument("--fe_model_path", type=str, default="logs/cubic_source_only/least_squares/shared_model/2025-04-17_12-34-08/model.pth", help="Path to pretrained function encoder model")
-parser.add_argument("--fe_n_basis", type=int, default=11, help="Number of basis functions for function encoder")
+parser.add_argument("--fe_model_path", type=str, default="logs/cubic_source_only/least_squares/shared_model/2025-04-17_13-04-50/model.pth", help="Path to pretrained function encoder model")
+parser.add_argument("--fe_n_basis", type=int, default=15, help="Number of basis functions for function encoder")
 parser.add_argument("--fe_concat_mode", type=str, default='concat_u', choices=['replace', 'concat_u', 'concat_x'], 
                     help="How to combine function encoder representations with inputs")
 parser.add_argument("--fe_arch", type=str, default="MLP", help="Architecture for function encoder")
+parser.add_argument("--no_copy_sensors_to_test", action="store_true", 
+                   help="If set, sensor locations will not be copied from training to testing, allowing fully independent test sensor locations.")
 
 args = parser.parse_args()
 assert args.model_type in ["SVD", "Eigen", "matrix", "deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn", "deeposet"]
@@ -204,7 +216,7 @@ dataset_type = args.dataset_type
 nonlinear_datasets = ["MountainCar", "Elastic", "Darcy", "Heat", "LShaped", "Burger"]
 transformation_type = "nonlinear" if args.dataset_type in nonlinear_datasets else "linear"
 n_layers = args.n_layers
-freeze_example_xs = not args.unfreeze_sensors
+freeze_example_xs_train = not args.unfreeze_sensors
 
 # POD is a special case, since it cant compute more eigen functions (Basis functions) then there are data points.
 # 2Stage is likewise affected
@@ -224,21 +236,62 @@ else:
 # seed torch
 torch.manual_seed(seed)
 
+# Determine if training source sensors should be frozen
+freeze_example_xs_train = not args.unfreeze_sensors
+
 # generate datasets
-src_dataset, tgt_dataset, combined_dataset = get_dataset(dataset_type, test=False, model_type=model_type, n_sensors=args.n_sensors, device=device, freeze_example_xs=freeze_example_xs)
-_, _, testing_combined_dataset = get_dataset(dataset_type, test=True, model_type=model_type, n_sensors=args.n_sensors, device=device, freeze_example_xs=freeze_example_xs)
+# Pass the training freeze flag and the testing flags to get_dataset
+src_dataset, tgt_dataset, combined_dataset = get_dataset(
+    dataset_type, test=False, model_type=model_type, n_sensors=args.n_sensors, device=device,
+    freeze_example_xs_train=freeze_example_xs_train,
+    test_variable_sensors=args.test_variable_sensors,
+    no_copy_sensors_to_test=args.no_copy_sensors_to_test
+)
+testing_src_dataset, testing_tgt_dataset, testing_combined_dataset = get_dataset(
+    dataset_type, test=True, model_type=model_type, n_sensors=args.n_sensors, device=device,
+    freeze_example_xs_train=freeze_example_xs_train, # Pass the TRAIN freeze setting
+    test_variable_sensors=args.test_variable_sensors, # Pass the test setting
+    no_copy_sensors_to_test=args.no_copy_sensors_to_test # Pass the test setting
+)
 
-# if using deeponet or deeposet, we need to copy the input sensors if they were frozen
-if "deeponet" in args.model_type or args.model_type == "deeposet":
-    # Only copy if they were actually frozen during dataset creation
-    if freeze_example_xs:
-        testing_combined_dataset.src_dataset.example_xs = combined_dataset.src_dataset.example_xs
-        testing_combined_dataset.example_xs = combined_dataset.example_xs # Assuming CombinedDataset also stores it
+# Add a print statement to confirm the test dataset's freezing status
+if args.model_type == "deeposet" or "deeponet" in args.model_type:
+    if testing_combined_dataset.src_dataset.freeze_example_xs:
+        print("Testing dataset source sensors (example_xs) are FROZEN.")
+    else:
+        print("Testing dataset source sensors (example_xs) are VARIABLE.")
 
-# if using POD or 2stage, we need to copy the output sensors
+# Copy source sensor locations from training to testing when appropriate
+# Only copy if: source sensors are frozen for testing AND we're not testing variable sensors OR not copying sensors is disabled
+if (testing_combined_dataset.src_dataset.freeze_example_xs and 
+    (not args.test_variable_sensors or not args.no_copy_sensors_to_test)):
+    # Make sure the training dataset has initialized its example_xs
+    if combined_dataset.example_xs is None and combined_dataset.src_dataset.freeze_example_xs:
+        # Force initialization by sampling
+        example_xs, _, _, _, _ = combined_dataset.sample(device)
+    
+    # Now copy from training to testing
+    if combined_dataset.example_xs is not None:
+        if testing_combined_dataset.example_xs is None:
+            testing_combined_dataset.example_xs = combined_dataset.example_xs
+        
+        if testing_combined_dataset.src_dataset.example_xs is None:
+            testing_combined_dataset.src_dataset.example_xs = combined_dataset.src_dataset.example_xs
+        
+        print(f"Copied frozen source sensor locations from training to testing dataset.")
+    else:
+        print("Warning: Training dataset's sensors not initialized yet, cannot copy to testing dataset.")
+
+# if using POD or 2stage, we need to copy the output sensors (Target queries 'xs')
+# This logic remains the same as it concerns the target dataset's 'xs'
 if args.model_type == "deeponet_pod" or args.model_type == "deeponet_2stage":
-    testing_combined_dataset.tgt_dataset.frozen_xs = combined_dataset.tgt_dataset.frozen_xs
-    testing_combined_dataset.frozen_xs = combined_dataset.frozen_xs
+    # Check if the target dataset actually froze xs during its creation
+    if combined_dataset.tgt_dataset.freeze_xs:
+        testing_combined_dataset.tgt_dataset.frozen_xs = combined_dataset.tgt_dataset.frozen_xs
+        testing_combined_dataset.frozen_xs = combined_dataset.frozen_xs # Assuming CombinedDataset also stores it
+        print("Copying frozen target query locations (xs) from training to testing dataset.")
+    else:
+         print("Target query locations (xs) are not frozen for training, no copy needed for testing.")
 
 
 # calculate hidden layer size based on approximate number of parameters
@@ -555,7 +608,6 @@ if load_path is not None: # load models
     elif args.model_type in ["deeponet_2stage", "deeponet_2stage_cnn"]:
         model["tgt"].load_state_dict(torch.load(f"{logdir}/tgt_model.pth", weights_only=True))
         model["A"].load_state_dict(torch.load(f"{logdir}/A.pth", weights_only=True))
-        model["T"] = torch.load(f"{logdir}/T.pth", weights_only=True)
     else:
         model.load_state_dict(torch.load(f"{logdir}/model.pth", weights_only=True))
 else: # train models
@@ -726,7 +778,7 @@ with torch.no_grad():
 
 
     # plot transformation for all model types
-    example_xs, example_ys, xs, ys, info = testing_combined_dataset.sample(device, plot_only=True)
+    example_xs, example_ys, xs, ys, info = testing_combined_dataset.sample(device)
     info["model_type"] = f"{model_type}_{args.train_method}" if model_type in ["SVD", "Eigen", "matrix"] else model_type
 
     # mountain car plot needs a 2d grid instead of the random data, for plotting purposes.
@@ -808,6 +860,149 @@ with torch.no_grad():
     # plot
     if not (args.dataset_type in ["Heat", "Burger"] and args.model_type == "deeponet_pod"): # POD cannot be called on new inputs, so it cannot plot.
         plot_transformation(grid, grid_outs, example_y_hats, xs, ys, y_hats, info, logdir)
+
+
+# plot transformation for all model types using TESTING data
+print("\nGenerating transformation plot using TESTING dataset...")
+example_xs_test, example_ys_test, xs_test, ys_test, info_test = testing_combined_dataset.sample(device) # Use testing dataset
+info_test["model_type"] = f"{model_type}_{args.train_method}" if model_type in ["SVD", "Eigen", "matrix"] else model_type
+plot_test_example_xs_id = id(example_xs_test)
+print(f"  Plotting Test Data: example_xs_test ID: {plot_test_example_xs_id}, Shape: {example_xs_test.shape}, First val: {example_xs_test.flatten()[0].item():.4f}")
+
+# --- Predict using TESTING data ---
+example_y_hats_test = None
+y_hats_test = None
+with torch.no_grad():
+    if model_type == "matrix":
+        if type(testing_combined_dataset.src_dataset) == HeatSrcDataset:
+             src_Cs_test = example_ys_test[:, 0, :]
+        else:
+             src_Cs_test, _ = model["src"].compute_representation(example_xs_test, example_ys_test, method=args.train_method)
+        if transformation_type == "linear":
+            tgt_Cs_hat_test = src_Cs_test @ model["A"].T
+        else:
+            tgt_Cs_hat_test = model["A"](src_Cs_test)
+        y_hats_test = model["tgt"].predict(xs_test, tgt_Cs_hat_test)
+        # Optionally predict source reconstruction if src_model exists
+        if model["src"] is not None:
+             example_y_hats_test = model["src"].predict(example_xs_test, src_Cs_test)
+
+    elif model_type == "SVD" or model_type == "Eigen":
+        y_hats_test = model.predict_from_examples(example_xs_test, example_ys_test, xs_test, method=args.train_method, representation_dataset="source", prediction_dataset="target")
+        # SVD/Eigen might not have a direct source reconstruction, set example_y_hats_test if needed/possible
+        # example_y_hats_test = model.predict_from_examples(example_xs_test, example_ys_test, example_xs_test, ...) # Example
+
+    elif model_type == "deeponet_2stage":
+        tgt_Cs_hat_test = (model["T"] @ model["A"](example_ys_test.reshape(example_ys_test.shape[0], -1)).T).T
+        y_hats_test = model["tgt"].predict(xs_test, tgt_Cs_hat_test)
+        # Predict source reconstruction if needed
+        # example_y_hats_test = ... # Requires source model prediction logic if applicable
+
+    elif model_type == "deeponet_2stage_cnn":
+        tgt_Cs_hat_test = (model["T"] @ model["A"](example_ys_test).T).T
+        y_hats_test = model["tgt"].predict(xs_test, tgt_Cs_hat_test)
+        # Predict source reconstruction if needed
+        # example_y_hats_test = ... # Requires source model prediction logic if applicable
+
+    else: # deeponet*, deeposet
+        y_hats_test = model.forward(example_xs_test, example_ys_test, xs_test)
+        # Predict source reconstruction (if the model supports/needs it for plotting)
+        # example_y_hats_test = model.forward(example_xs_test, example_ys_test, example_xs_test) # Example
+
+# --- Call Plotting Function for TESTING data ---
+# mountain car plot needs a 2d grid instead of the random data, for plotting purposes.
+if args.dataset_type == "MountainCar":
+    plot_transformation_mountain_car(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "QuadraticSin":
+    plot_transformation_quadratic_sin(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "Derivative":
+    plot_transformation_derivative(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "Integral":
+    plot_transformation_integral(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "Elastic":
+    plot_transformation_elastic(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "Darcy":
+    plot_transformation_darcy(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "Heat":
+    plot_transformation_heat(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "LShaped":
+    plot_transformation_L(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+elif args.dataset_type == "Burger":
+    plot_transformation_burger(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+
+
+# --- NEW SECTION: Plot transformation using TRAINING data ---
+print("\nGenerating transformation plot using TRAINING dataset...")
+# Sample training data AGAIN for plotting
+example_xs_train, example_ys_train, xs_train, ys_train, info_train = combined_dataset.sample(device)
+info_train["model_type"] = f"{model_type}_{args.train_method}" if model_type in ["SVD", "Eigen", "matrix"] else model_type
+plot_train_example_xs_id = id(example_xs_train)
+print(f"  Plotting Train Data: example_xs_train ID: {plot_train_example_xs_id}, Shape: {example_xs_train.shape}, First val: {example_xs_train.flatten()[0].item():.4f}")
+
+# --- Predict using TRAINING data ---
+example_y_hats_train = None
+y_hats_train = None
+with torch.no_grad():
+    # Replicate prediction logic using _train variables
+    if model_type == "matrix":
+        if type(combined_dataset.src_dataset) == HeatSrcDataset: # Check training dataset type
+             src_Cs_train = example_ys_train[:, 0, :]
+        else:
+             src_Cs_train, _ = model["src"].compute_representation(example_xs_train, example_ys_train, method=args.train_method)
+        if transformation_type == "linear":
+            tgt_Cs_hat_train = src_Cs_train @ model["A"].T
+        else:
+            tgt_Cs_hat_train = model["A"](src_Cs_train)
+        y_hats_train = model["tgt"].predict(xs_train, tgt_Cs_hat_train)
+        if model["src"] is not None:
+             example_y_hats_train = model["src"].predict(example_xs_train, src_Cs_train)
+
+    elif model_type == "SVD" or model_type == "Eigen":
+        y_hats_train = model.predict_from_examples(example_xs_train, example_ys_train, xs_train, method=args.train_method, representation_dataset="source", prediction_dataset="target")
+        # example_y_hats_train = ... # Predict source if needed
+
+    elif model_type == "deeponet_2stage":
+        tgt_Cs_hat_train = (model["T"] @ model["A"](example_ys_train.reshape(example_ys_train.shape[0], -1)).T).T
+        y_hats_train = model["tgt"].predict(xs_train, tgt_Cs_hat_train)
+        # example_y_hats_train = ... # Predict source if needed
+
+    elif model_type == "deeponet_2stage_cnn":
+        tgt_Cs_hat_train = (model["T"] @ model["A"](example_ys_train).T).T
+        y_hats_train = model["tgt"].predict(xs_train, tgt_Cs_hat_train)
+        # example_y_hats_train = ... # Predict source if needed
+
+    else: # deeponet*, deeposet
+        y_hats_train = model.forward(example_xs_train, example_ys_train, xs_train)
+        # example_y_hats_train = model.forward(example_xs_train, example_ys_train, example_xs_train) # Predict source if needed
+
+# --- Call Plotting Function for TRAINING data ---
+# Create a subdirectory for these plots
+train_plot_logdir = os.path.join(logdir, "train_sensor_plots")
+os.makedirs(train_plot_logdir, exist_ok=True)
+
+# Call the same plotting functions but with _train data and the new logdir
+if args.dataset_type == "MountainCar":
+    plot_transformation_mountain_car(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "QuadraticSin":
+    plot_transformation_quadratic_sin(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "Derivative":
+    plot_transformation_derivative(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "Integral":
+    plot_transformation_integral(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "Elastic":
+    plot_transformation_elastic(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "Darcy":
+    plot_transformation_darcy(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "Heat":
+    plot_transformation_heat(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "LShaped":
+    plot_transformation_L(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+elif args.dataset_type == "Burger":
+    plot_transformation_burger(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+
+print(f"Training sensor plots saved in: {train_plot_logdir}")
+
+# --- End of Script ---
 
 
 

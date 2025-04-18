@@ -14,12 +14,17 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--n_basis", type=int, default=15)
 parser.add_argument("--train_method", type=str, default="least_squares")
-parser.add_argument("--epochs", type=int, default=150_000)
+parser.add_argument("--epochs", type=int, default=100000)  # 700000 / 20 = 35000 epochs
 parser.add_argument("--load_path", type=str, default=None)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--residuals", action="store_true")
 parser.add_argument("--parallel", action="store_true")
 parser.add_argument("--n_sensors", type=int, default=1000)
+parser.add_argument("--n_functions_per_batch", type=int, default=50)  # 20 functions per batch
+parser.add_argument("--n_output_points", type=int, default=10000)
+parser.add_argument("--learning_rate", type=float, default=1e-3)  # Initial learning rate of 10^-3
+parser.add_argument("--lr_decay_step", type=int, default=30000)  # Step at which to decrease learning rate
+parser.add_argument("--lr_decay_factor", type=float, default=0.1)  # Factor to decrease learning rate by
 args = parser.parse_args()
 
 
@@ -31,6 +36,11 @@ train_method = args.train_method
 seed = args.seed
 load_path = args.load_path
 n_sensors = args.n_sensors
+n_functions_per_batch = args.n_functions_per_batch
+n_output_points = args.n_output_points
+learning_rate = args.learning_rate
+lr_decay_step = args.lr_decay_step
+lr_decay_factor = args.lr_decay_factor
 residuals = args.residuals
 if load_path is None:
     logdir = f"logs/cubic_source_only/{train_method}/{'shared_model' if not args.parallel else 'parallel_models'}/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
@@ -48,7 +58,10 @@ c_range = (-3/50, 3/50)
 d_range = (-3/50, 3/50)
 input_range = (-10, 10)
 dataset = CubicDataset(a_range=a_range, b_range=b_range, c_range=c_range, d_range=d_range, 
-                     input_range=input_range, n_examples_per_sample=n_sensors)
+                     input_range=input_range, 
+                     n_examples_per_sample=n_sensors,
+                     n_functions_per_sample=n_functions_per_batch,
+                     n_points_per_sample=n_output_points)
 
 if load_path is None:
     # create the model

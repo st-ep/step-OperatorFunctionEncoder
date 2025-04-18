@@ -12,7 +12,7 @@ class OperatorDataset(BaseDataset):
                          data_type:str = "deterministic",
                          n_functions_per_sample:int = 10,
                          n_examples_per_sample:int = 1000,
-                         n_points_per_sample:int = 10000,
+                         n_points_per_sample:int = 50,
                          freeze_example_xs:bool = False,
                          freeze_xs:bool = False,
                          ):
@@ -140,7 +140,11 @@ class CombinedDataset(BaseDataset):
             # then repeat it
             example_xs = example_xs[0]
             example_xs = example_xs.repeat(self.n_functions_per_sample, 1, 1)
+            # Store at both levels for easier access
             self.example_xs = example_xs[0]
+            # Also store in the source dataset to ensure consistency
+            if self.src_dataset.example_xs is None:
+                self.src_dataset.example_xs = example_xs
         else:  # otherwise load it
             example_xs = self.example_xs.repeat(self.n_functions_per_sample, 1, 1)
 
