@@ -12,7 +12,7 @@ class OperatorDataset(BaseDataset):
                          data_type:str = "deterministic",
                          n_functions_per_sample:int = 10,
                          n_examples_per_sample:int = 1000,
-                         n_points_per_sample:int = 50,
+                         n_points_per_sample:int = 10000,
                          freeze_example_xs:bool = False,
                          freeze_xs:bool = False,
                          ):

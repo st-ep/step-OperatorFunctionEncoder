@@ -157,27 +157,27 @@ parser.add_argument("--approximate_number_paramaters", type=int, default=300_000
 parser.add_argument("--phi_hidden_size", type=int, default=256, help="Hidden size for DeepOSet phi network")
 parser.add_argument("--rho_hidden_size", type=int, default=256, help="Hidden size for DeepOSet rho network")
 parser.add_argument("--trunk_hidden_size", type=int, default=256, help="Hidden size for DeepOSet trunk network")
-parser.add_argument("--pos_encoding_type", type=str, default="mlp", choices=['mlp', 'sinusoidal'], help="Type of positional encoding for DeepOSet ('mlp' or 'sinusoidal')")
-parser.add_argument("--pos_encoding_dim", type=int, default=64, help="Dimension for MLP positional encoding output (concatenate) or sinusoidal features (film)")
+parser.add_argument("--pos_encoding_type", type=str, default='skip', choices=['mlp', 'sinusoidal', 'skip'], help="Type of positional encoding for DeepOSet ('mlp', 'sinusoidal', or 'skip' to use raw positions)")
+parser.add_argument("--pos_encoding_dim", type=int, default=64, help="Dimension for MLP positional encoding output (concatenate) or sinusoidal features (film)") # default 64
 parser.add_argument("--pos_encoding_max_freq", type=float, default=100.0, help="Maximum frequency/scale for sinusoidal positional encoding in DeepOSet") # Make this 10.0
-parser.add_argument("--encoding_strategy", type=str, default="concatenate", 
-                   choices=['concatenate', 'film', 'function_encoder'], 
-                   help="Encoding strategy for DeepOSet branch ('concatenate', 'film', or 'function_encoder')")
+parser.add_argument("--encoding_strategy", type=str, default="concatenate",
+                   choices=['concatenate', 'film'], # Removed 'function_encoder'
+                   help="Encoding strategy for DeepOSet branch ('concatenate' or 'film')")
 parser.add_argument("--film_modulation_dim", type=int, default=None, help="Modulation dimension for FiLM strategy (defaults to phi_hidden_size if None)")
-parser.add_argument("--phi_output_size", type=int, default=128, 
+parser.add_argument("--phi_output_size", type=int, default=32, # default 32
                    help="Output dimension of the phi network in DeepOSet before aggregation")
+parser.add_argument("--aggregation_type", type=str, default="mean",
+                    choices=["mean", "attention"],
+                    help="Sensor aggregation method for DeepOSet branch ('mean' or 'attention')")
+parser.add_argument("--attention_n_tokens", type=int, default=8,
+                    help="Number of learnable query tokens if aggregation_type='attention'")
 # --- End DeepOSet Specific Args ---
 parser.add_argument("--unfreeze_sensors", action="store_true")
 parser.add_argument("--use_lr_schedule", action="store_true", help="Enable learning rate scheduling for applicable models (e.g., DeepONet)")
 parser.add_argument("--lr_schedule_steps", type=int, nargs='+', default=[50000, 100000, 150000, 200000, 250000], help="List of steps (iterations) for LR decay milestones.")
 parser.add_argument("--lr_schedule_gammas", type=float, nargs='+', default=[0.2, 0.5, 0.2, 0.5, 0.2], help="List of multiplicative factors (gammas) for LR decay at each step.")
 parser.add_argument("--test_variable_sensors", action="store_true", help="If set, train with fixed source sensors (unless --unfreeze_sensors) and variable target queries, but test with variable source sensors and variable target queries.")
-parser.add_argument("--fe_model_path", type=str, default="logs/cubic_source_only/least_squares/shared_model/2025-04-17_13-04-50/model.pth", help="Path to pretrained function encoder model")
-parser.add_argument("--fe_n_basis", type=int, default=15, help="Number of basis functions for function encoder")
-parser.add_argument("--fe_concat_mode", type=str, default='concat_u', choices=['replace', 'concat_u', 'concat_x'], 
-                    help="How to combine function encoder representations with inputs")
-parser.add_argument("--fe_arch", type=str, default="MLP", help="Architecture for function encoder")
-parser.add_argument("--no_copy_sensors_to_test", action="store_true", 
+parser.add_argument("--no_copy_sensors_to_test", action="store_true",
                    help="If set, sensor locations will not be copied from training to testing, allowing fully independent test sensor locations.")
 
 args = parser.parse_args()
@@ -311,46 +311,6 @@ if args.model_type != "deeposet": # Calculate only if NOT deeposet
     )
 else:
     hidden_size = None # Not used directly for DeepOSet instantiation anymore
-
-# Add this function definition before the model initialization code
-
-def load_function_encoder(args):
-    """Load a pretrained function encoder model"""
-    if args.fe_model_path is None:
-        return None
-    
-    # Get shapes from the source dataset
-    if hasattr(src_dataset, 'input_size') and hasattr(src_dataset, 'output_size'):
-        fe_input_size = src_dataset.input_size
-        fe_output_size = src_dataset.output_size
-    else:
-        # Default to 1D if shapes not available directly
-        fe_input_size = (args.input_size_src,)
-        fe_output_size = (args.output_size_src,)
-    
-    # Create FunctionEncoder with same architecture as trained model
-    function_encoder = FunctionEncoder(
-        input_size=fe_input_size,
-        output_size=fe_output_size,
-        data_type="deterministic",
-        n_basis=args.fe_n_basis,
-        model_type=args.fe_arch,
-        method="least_squares"
-    ).to(device)
-    
-    # Load pre-trained weights
-    if os.path.exists(args.fe_model_path):
-        function_encoder.load_state_dict(torch.load(args.fe_model_path))
-        print(f"Loaded function encoder from {args.fe_model_path}")
-        
-        # Freeze the function encoder parameters
-        for param in function_encoder.parameters():
-            param.requires_grad = False
-        print("Function encoder parameters frozen")
-    else:
-        print(f"Warning: Function encoder model path {args.fe_model_path} not found. Using untrained model.")
-    
-    return function_encoder
 
 # create the model
 if args.model_type == "SVD" or args.model_type == "Eigen":
@@ -500,22 +460,33 @@ elif args.model_type == "deeposet":
     schedule_steps = args.lr_schedule_steps if args.use_lr_schedule else None
     schedule_gammas = args.lr_schedule_gammas if args.use_lr_schedule else None
 
+    # Determine if positional encoding should be used based on strategy AND type
+    use_pos_encoding = args.encoding_strategy in ['concatenate', 'film'] and args.pos_encoding_type != 'skip'
+
     model = DeepOSet(
         input_size_src=src_dataset.input_size[0],
         output_size_src=src_dataset.output_size[0],
         input_size_tgt=tgt_dataset.input_size[0],
         output_size_tgt=tgt_dataset.output_size[0],
-        p=n_basis,
+        p=n_basis, # Using n_basis as the latent dimension 'p'
+        # Network sizes from args
         trunk_hidden_size=args.trunk_hidden_size,
         phi_hidden_size=args.phi_hidden_size,
         rho_hidden_size=args.rho_hidden_size,
         phi_output_size=args.phi_output_size,
-        # Use the user-specified encoding strategy directly
+        # Encoding strategy and related parameters from args
         encoding_strategy=args.encoding_strategy,
-        fe_n_basis=args.fe_n_basis,
-        fe_concat_mode=args.fe_concat_mode,
-        fe_arch=args.fe_arch,
-        function_encoder_model=load_function_encoder(args) if args.encoding_strategy == 'function_encoder' else None,
+        use_positional_encoding=use_pos_encoding, # Pass updated flag
+        pos_encoding_type=args.pos_encoding_type, # Pass from args (can be 'skip')
+        pos_encoding_dim=args.pos_encoding_dim,   # Pass from args
+        pos_encoding_max_freq=args.pos_encoding_max_freq, # Pass from args
+        film_modulation_dim=args.film_modulation_dim, # Pass from args (can be None)
+        # LR schedule parameters from args
+        lr_schedule_steps=schedule_steps,
+        lr_schedule_gammas=schedule_gammas,
+        # NEW
+        aggregation_type=args.aggregation_type,
+        attention_n_tokens=args.attention_n_tokens,
     ).to(device)
 else:
     raise ValueError(f"Unknown model type: {args.model_type}")
@@ -562,6 +533,8 @@ params = {"seed": seed,
           # Add DeepOSet encoding strategy params
           "encoding_strategy": args.encoding_strategy if args.model_type == "deeposet" else None,
           "film_modulation_dim": args.film_modulation_dim if args.model_type == "deeposet" and args.encoding_strategy == 'film' else None,
+          "aggregation_type": args.aggregation_type if args.model_type == "deeposet" else None,
+          "attention_n_tokens": args.attention_n_tokens if (args.model_type == "deeposet" and args.aggregation_type=="attention") else None,
           }
 # Add LR schedule info only if the model has it and schedule was used
 if hasattr(model, 'initial_lr'):

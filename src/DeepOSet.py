@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from FunctionEncoder import BaseDataset, BaseCallback, FunctionEncoder # Added FunctionEncoder import
+from FunctionEncoder import BaseDataset, BaseCallback # Keep BaseDataset/Callback if used
 from tqdm import trange
 from torch.optim.lr_scheduler import _LRScheduler # Import base class for type hinting if needed
 
@@ -12,7 +12,6 @@ class DeepOSet(torch.nn.Module):
                  output_size_src,     # Dimensionality of sensor value u(x_i) (e.g., 1 for scalar)
                  input_size_tgt,      # Dimensionality of trunk input y (e.g., 1 for 1D)
                  output_size_tgt,     # Dimensionality of final output G(u)(y) (e.g., 1 for scalar)
-                 # n_input_sensors is not strictly needed if handling variable sensors, but kept for consistency/potential use
                  p=32,                # Latent dimension for the branch/trunk cross product (Default)
                  phi_hidden_size=256, # Hidden layer size for the phi network (Default)
                  rho_hidden_size=256, # Hidden layer size for the rho network (Default)
@@ -26,15 +25,17 @@ class DeepOSet(torch.nn.Module):
                  lr_schedule_gammas=None, # Multiplicative factor for each step (optional)
                  use_positional_encoding=True, # Flag to enable/disable positional encoding
                  pos_encoding_dim=64, # Dimension for the positional encoding MLP output (concatenate) or sinusoidal input (film)
-                 pos_encoding_type='mlp', # Type: 'mlp' or 'sinusoidal'
+                 pos_encoding_type='skip', # Type: 'mlp', 'sinusoidal', or 'skip' (Default changed to skip)
                  pos_encoding_max_freq=1000.0, # Max frequency/scale for sinusoidal encoding
                  encoding_strategy='concatenate', # 'concatenate' or 'film'
                  film_modulation_dim=None, # Dimension for FiLM modulation (defaults to phi_hidden_size)
-                 # New parameters for function encoder integration
-                 function_encoder_model=None,
-                 fe_n_basis=11,
-                 fe_concat_mode='concat_u',  # 'replace', 'concat_u', or 'concat_x'
-                 fe_arch="MLP"
+                 aggregation_type: str = "mean",  # 'mean' or 'attention'
+                 attention_n_tokens: int = 8,     # k – number of learnable query tokens
+                 # Removed function encoder parameters:
+                 # function_encoder_model=None,
+                 # fe_n_basis=11,
+                 # fe_concat_mode='concat_u',
+                 # fe_arch="MLP"
                  ):
         super().__init__()
 
@@ -43,9 +44,10 @@ class DeepOSet(torch.nn.Module):
         self.output_size_src = output_size_src
         self.input_size_tgt = input_size_tgt
         self.output_size_tgt = output_size_tgt
-        self.use_positional_encoding = use_positional_encoding
-        self.pos_encoding_dim = pos_encoding_dim if use_positional_encoding else 0
-        self.pos_encoding_type = pos_encoding_type if use_positional_encoding else None
+        # Note: use_positional_encoding is True if type is 'mlp' or 'sinusoidal'
+        self.use_positional_encoding = use_positional_encoding and pos_encoding_type != 'skip'
+        self.pos_encoding_dim = pos_encoding_dim if self.use_positional_encoding else 0
+        self.pos_encoding_type = pos_encoding_type
         self.pos_encoding_max_freq = pos_encoding_max_freq # Store max frequency/scale
         self.encoding_strategy = encoding_strategy
         # Default film_modulation_dim to phi_hidden_size if not provided
@@ -58,17 +60,32 @@ class DeepOSet(torch.nn.Module):
         self.trunk_hidden_size = trunk_hidden_size
         self.n_trunk_layers = n_trunk_layers
 
-        # Add the new function encoder parameters
-        self.function_encoder_model = function_encoder_model
-        self.fe_n_basis = fe_n_basis
-        self.fe_concat_mode = fe_concat_mode
-        self.fe_arch = fe_arch
+        # ---------------------------------------------------------------------
+        # Aggregation choice ('mean' | 'attention')
+        # ---------------------------------------------------------------------
+        self.aggregation = aggregation_type.lower()
+        if self.aggregation not in ["mean", "attention"]:
+            raise ValueError("aggregation_type must be either 'mean' or 'attention'")
+        self.attention_n_tokens = attention_n_tokens
+
+        if self.aggregation == "attention":
+            from utils.attention_pool import AttentionPool
+            self.pool = AttentionPool(phi_output_size,
+                                      n_heads=4,
+                                      n_tokens=self.attention_n_tokens)
+
+        # Removed function encoder parameter assignments
+        # self.function_encoder_model = function_encoder_model
+        # self.fe_n_basis = fe_n_basis
+        # self.fe_concat_mode = fe_concat_mode
+        # self.fe_arch = fe_arch
 
         # Validate encoding strategy
-        if self.encoding_strategy not in ['concatenate', 'film', 'function_encoder']:
-            raise ValueError("encoding_strategy must be 'concatenate', 'film', or 'function_encoder'")
-        if self.encoding_strategy == 'film' and not self.use_positional_encoding:
-            raise ValueError("FiLM encoding strategy requires use_positional_encoding=True")
+        if self.encoding_strategy not in ['concatenate', 'film']: # Removed 'function_encoder'
+            raise ValueError("encoding_strategy must be 'concatenate' or 'film'")
+        # Validate pos_encoding_type
+        if self.pos_encoding_type not in ['mlp', 'sinusoidal', 'skip']:
+             raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}. Choose 'mlp', 'sinusoidal', or 'skip'.")
 
         # Store LR schedule parameters
         self.initial_lr = initial_lr
@@ -89,12 +106,12 @@ class DeepOSet(torch.nn.Module):
 
         # --- Branch Network (Deep Sets) ---
         self.pos_encoder_mlp = None # For concatenate strategy with MLP encoding
-        self.film_pos_encoder = None # For film strategy (takes raw pos or sinusoidal feats)
+        self.film_pos_encoder = None # For film strategy (takes raw pos, sinusoidal feats, or skipped)
         self.u_projector = None # For film strategy
 
         if self.encoding_strategy == 'concatenate':
             # Determine phi input dimension and setup encoding components for concatenation
-            if self.use_positional_encoding:
+            if self.use_positional_encoding: # This is True only if type is 'mlp' or 'sinusoidal'
                 phi_input_dim = self.pos_encoding_dim + output_size_src
                 if self.pos_encoding_type == 'mlp':
                     # Simple MLP to encode positions - Added one more hidden layer
@@ -113,9 +130,11 @@ class DeepOSet(torch.nn.Module):
                     if self.pos_encoding_dim % (2 * self.input_size_src) != 0:
                          raise ValueError(f"For sinusoidal encoding, pos_encoding_dim ({self.pos_encoding_dim}) must be divisible by 2 * input_size_src ({2 * self.input_size_src}).")
                     # No separate encoder MLP needed here for concat, sinusoidal feats used directly
+                # No 'skip' case here because use_positional_encoding would be False
                 else:
-                    raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}. Choose 'mlp' or 'sinusoidal'.")
-            else:
+                    # This should not be reachable if use_positional_encoding logic is correct
+                    raise ValueError(f"Invalid pos_encoding_type '{self.pos_encoding_type}' when use_positional_encoding is True.")
+            else: # This case handles pos_encoding_type == 'skip' or if use_positional_encoding was explicitly False
                 # Original input: raw position + sensor value
                 phi_input_dim = input_size_src + output_size_src
 
@@ -133,16 +152,20 @@ class DeepOSet(torch.nn.Module):
             self.u_projector = nn.Linear(output_size_src, self.film_modulation_dim)
 
             film_encoder_input_dim = 0
-            if self.pos_encoding_type == 'mlp':
+            # Determine the input dimension for the FiLM parameter generator MLP
+            if self.pos_encoding_type == 'mlp' or self.pos_encoding_type == 'skip':
                 # FiLM encoder takes raw position and outputs gamma/beta
                 film_encoder_input_dim = input_size_src
             elif self.pos_encoding_type == 'sinusoidal':
                 # Ensure pos_encoding_dim is valid for sinusoidal
+                if not self.use_positional_encoding:
+                     raise ValueError("Sinusoidal pos_encoding_type requires use_positional_encoding=True (cannot be used with 'skip').")
                 if self.pos_encoding_dim % (2 * self.input_size_src) != 0:
                      raise ValueError(f"For sinusoidal encoding, pos_encoding_dim ({self.pos_encoding_dim}) must be divisible by 2 * input_size_src ({2 * self.input_size_src}).")
                 # FiLM encoder takes sinusoidal features and outputs gamma/beta
                 film_encoder_input_dim = self.pos_encoding_dim
             else:
+                 # Should be unreachable due to initial validation
                  raise ValueError(f"Unknown pos_encoding_type for FiLM: {self.pos_encoding_type}")
 
             # MLP to generate FiLM parameters (gamma, beta) from positional features
@@ -167,36 +190,14 @@ class DeepOSet(torch.nn.Module):
                 nn.Linear(phi_hidden_size, phi_output_size) # Output layer
             )
 
-        elif self.encoding_strategy == 'function_encoder':
-            # Determine phi input dimension based on concat mode
-            if self.fe_concat_mode == 'replace':
-                # Just use the coefficients
-                phi_input_dim = self.fe_n_basis
-            elif self.fe_concat_mode == 'concat_u':
-                # Concatenate coefficients with function values
-                phi_input_dim = self.fe_n_basis + output_size_src
-            elif self.fe_concat_mode == 'concat_x':
-                # Concatenate coefficients with positions
-                phi_input_dim = self.fe_n_basis + input_size_src
-            else:
-                raise ValueError(f"Unknown fe_concat_mode: {self.fe_concat_mode}")
-                
-            # Create phi network for function encoder mode
-            self.phi = nn.Sequential(
-                nn.Linear(phi_input_dim, phi_hidden_size),
-                activation_fn(),
-                nn.Linear(phi_hidden_size, phi_hidden_size),
-                activation_fn(),
-                nn.Linear(phi_hidden_size, phi_output_size)
-            )
-
         # Rho network: processes aggregated representation from phi
-        # Input dim: phi_output_size (after aggregation)
+        rho_input_dim = (self.phi_output_size *
+                         (self.attention_n_tokens if self.aggregation == "attention" else 1))
+
         self.rho = nn.Sequential(
-            nn.Linear(phi_output_size, rho_hidden_size),
+            nn.Linear(rho_input_dim, rho_hidden_size),
             activation_fn(),
-            nn.Linear(rho_hidden_size, output_size_tgt * p) # Final branch output (before reshape)
-            # Output dim: output_size_tgt * p
+            nn.Linear(rho_hidden_size, output_size_tgt * p)
         )
         # --- End Branch Network ---
 
@@ -227,20 +228,9 @@ class DeepOSet(torch.nn.Module):
         self.method = "deepOSet"
         self.average_function = None
 
-        # Initialize function encoder if needed
-        if self.encoding_strategy == 'function_encoder' and self.function_encoder_model is None:
-            # Create a new function encoder if one wasn't provided
-            self.function_encoder_model = FunctionEncoder(
-                input_size=(input_size_src,),
-                output_size=(output_size_src,),
-                data_type="deterministic",
-                n_basis=self.fe_n_basis,
-                model_type=self.fe_arch,
-                method="least_squares"
-            ).to(next(self.parameters()).device)
-            # Freeze the function encoder if it's pre-trained
-            # for param in self.function_encoder_model.parameters():
-            #     param.requires_grad = False
+        # Removed function encoder initialization logic
+        # if self.encoding_strategy == 'function_encoder' and self.function_encoder_model is None:
+            # ... (removed code) ...
 
     def _sinusoidal_encoding(self, coords):
         """Applies fixed sinusoidal encoding to coordinates."""
@@ -300,12 +290,13 @@ class DeepOSet(torch.nn.Module):
 
         # --- Apply Encoding Strategy ---
         if self.encoding_strategy == 'concatenate':
-            encoded_xs = None
-            if self.use_positional_encoding:
+            encoded_xs = None # Initialize variable to hold encoded xs
+            if self.use_positional_encoding: # True only for 'mlp' or 'sinusoidal' types
+                # --- Corrected Logic ---
                 if self.pos_encoding_type == 'mlp':
-                    if self.pos_encoder_mlp is None:
+                    if self.pos_encoder_mlp is None: # Check specific to MLP type
                         raise RuntimeError("Encoding strategy is 'concatenate' with 'mlp' but pos_encoder_mlp is not initialized.")
-                    # Encode positions: (batch * n_sensors, pos_encoding_dim)
+                    # Encode positions using MLP: (batch * n_sensors, pos_encoding_dim)
                     encoded_xs = self.pos_encoder_mlp(xs_reshaped)
                 elif self.pos_encoding_type == 'sinusoidal':
                     # Calculate sinusoidal encoding: (batch, n_sensors, pos_encoding_dim)
@@ -313,12 +304,14 @@ class DeepOSet(torch.nn.Module):
                     # Reshape: (batch * n_sensors, pos_encoding_dim)
                     encoded_xs = encoded_xs_full.view(batch_size * n_sensors, self.pos_encoding_dim)
                 else:
-                    raise ValueError(f"Unknown pos_encoding_type: {self.pos_encoding_type}")
+                    # Should not happen if __init__ validation is correct
+                    raise ValueError(f"Invalid pos_encoding_type '{self.pos_encoding_type}' encountered in forward_branch when use_positional_encoding is True.")
 
-                # Concatenate encoded location and value
+                # Concatenate the correctly encoded location and value
                 # Shape: (batch * n_sensors, pos_encoding_dim + output_size_src)
                 phi_input_reshaped = torch.cat((encoded_xs, us_reshaped), dim=1)
-            else:
+                # --- End Corrected Logic ---
+            else: # Handles 'skip' type or explicitly disabled positional encoding
                 # Original: Concatenate raw location and value
                 # Shape: (batch * n_sensors, input_size_src + output_size_src)
                 phi_input_reshaped = torch.cat((xs_reshaped, us_reshaped), dim=1)
@@ -328,15 +321,20 @@ class DeepOSet(torch.nn.Module):
                  raise RuntimeError("Encoding strategy is 'film' but FiLM components are not initialized.")
 
             pos_features_reshaped = None
-            if self.pos_encoding_type == 'mlp':
+            # Determine input features for the FiLM parameter generator
+            if self.pos_encoding_type == 'mlp' or self.pos_encoding_type == 'skip':
                 # Use raw positions as input to the FiLM parameter generator
                 pos_features_reshaped = xs_reshaped
             elif self.pos_encoding_type == 'sinusoidal':
+                 # Check if encoding is actually enabled (it should be for sinusoidal)
+                if not self.use_positional_encoding:
+                     raise RuntimeError("Sinusoidal encoding type selected for FiLM, but use_positional_encoding is False.")
                 # Calculate sinusoidal encoding first
                 # Shape: (batch, n_sensors, pos_encoding_dim)
                 encoded_xs_full = self._sinusoidal_encoding(xs)
                 # Reshape: (batch * n_sensors, pos_encoding_dim)
                 pos_features_reshaped = encoded_xs_full.view(batch_size * n_sensors, self.pos_encoding_dim)
+            # No else needed due to __init__ validation
 
             # Generate FiLM parameters (gamma, beta)
             # Shape: (batch * n_sensors, 2 * film_modulation_dim)
@@ -353,52 +351,8 @@ class DeepOSet(torch.nn.Module):
             # Shape: (batch * n_sensors, film_modulation_dim)
             phi_input_reshaped = gamma * u_proj + beta
 
-        elif self.encoding_strategy == 'function_encoder':
-            # Compute the function encoder representation for each batch
-            fe_representations = []
-            
-            # Process each batch item separately since we need to compute representations per function
-            for b in range(batch_size):
-                batch_xs = xs[b]  # Shape: (n_sensors, input_size_src)
-                batch_us = us[b]  # Shape: (n_sensors, output_size_src)
-                
-                # Compute representation using function encoder
-                representation, _ = self.function_encoder_model.compute_representation(
-                    batch_xs.unsqueeze(0),  # Add batch dimension
-                    batch_us.unsqueeze(0),  # Add batch dimension
-                    method="least_squares"
-                )
-                
-                # Ensure representation has the expected shape (n_basis,) or (1, n_basis)
-                if len(representation.shape) > 1:
-                    representation = representation.squeeze()  # Remove any extra dimensions
-                
-                # Store representation for this batch
-                fe_representations.append(representation)
-            
-            # Stack representations - now each item should be properly shaped
-            fe_representations = torch.stack(fe_representations)  # Shape: (batch_size, n_basis)
-            
-            # Repeat representation for each sensor point - we need to expand properly
-            # Shape: (batch_size, n_sensors, n_basis)
-            fe_representations_expanded = fe_representations.unsqueeze(1).expand(-1, n_sensors, -1)
-            
-            # Reshape to match phi input shape
-            # Shape: (batch_size * n_sensors, n_basis)
-            fe_representations_reshaped = fe_representations_expanded.reshape(batch_size * n_sensors, self.fe_n_basis)
-            
-            # Prepare phi input based on concat mode
-            if self.fe_concat_mode == 'replace':
-                # Just use the coefficients
-                phi_input_reshaped = fe_representations_reshaped
-            elif self.fe_concat_mode == 'concat_u':
-                # Concatenate coefficients with function values
-                phi_input_reshaped = torch.cat((fe_representations_reshaped, us_reshaped), dim=1)
-            elif self.fe_concat_mode == 'concat_x':
-                # Concatenate coefficients with positions
-                phi_input_reshaped = torch.cat((fe_representations_reshaped, xs_reshaped), dim=1)
-        
         else:
+            # This should now be unreachable due to __init__ validation
             raise ValueError(f"Unknown encoding_strategy: {self.encoding_strategy}")
         # --- End Encoding Strategy ---
 
@@ -411,9 +365,11 @@ class DeepOSet(torch.nn.Module):
         # Shape: (batch_size, n_sensors, phi_output_size)
         phi_output_reshaped = phi_output.view(batch_size, n_sensors, self.phi_output_size)
 
-        # Aggregate over the sensor dimension (dim=1) using mean pooling
-        # Shape: (batch_size, phi_output_size)
-        aggregated = torch.mean(phi_output_reshaped, dim=1) # <<< Could also try other pooling here (e.g., max, sum)
+        # ---- Aggregation over sensors ---------------------------------------
+        if self.aggregation == "mean":
+            aggregated = torch.mean(phi_output_reshaped, dim=1)            # (B, dφ)
+        else:  # attention
+            aggregated = self.pool(phi_output_reshaped)                    # (B, dφ)
 
         # Apply rho to the aggregated representation
         # Shape: (batch_size, output_size_tgt * p)
@@ -580,9 +536,10 @@ class DeepOSet(torch.nn.Module):
         if self.lr_schedule_gammas is not None:
              params["lr_schedule_gammas"] = str(self.lr_schedule_gammas)
         # Add positional encoding params
-        params["use_positional_encoding"] = self.use_positional_encoding
-        if self.use_positional_encoding:
-            params["pos_encoding_type"] = self.pos_encoding_type
+        params["use_positional_encoding"] = self.use_positional_encoding # Reflects if MLP/Sinusoidal is active
+        # Always log the type, even if 'skip'
+        params["pos_encoding_type"] = self.pos_encoding_type
+        if self.use_positional_encoding: # Only log dim/freq if encoding is active
             params["pos_encoding_dim"] = self.pos_encoding_dim
             if self.pos_encoding_type == 'sinusoidal':
                 params["pos_encoding_max_freq"] = self.pos_encoding_max_freq
@@ -590,11 +547,17 @@ class DeepOSet(torch.nn.Module):
         params["encoding_strategy"] = self.encoding_strategy
         if self.encoding_strategy == 'film':
             params["film_modulation_dim"] = self.film_modulation_dim
-        # Add function encoder params
-        if self.encoding_strategy == 'function_encoder':
-            params["fe_n_basis"] = self.fe_n_basis
-            params["fe_concat_mode"] = self.fe_concat_mode
-            params["fe_arch"] = self.fe_arch
+
+        # Aggregation logging
+        params["aggregation_type"] = self.aggregation
+        if self.aggregation == "attention":
+            params["attention_n_tokens"] = self.attention_n_tokens
+
+        # Removed function encoder params from logging
+        # if self.encoding_strategy == 'function_encoder':
+        #     params["fe_n_basis"] = self.fe_n_basis
+        #     params["fe_concat_mode"] = self.fe_concat_mode
+        #     params["fe_arch"] = self.fe_arch
 
         params = {k: str(v) for k, v in params.items()}
         return params
