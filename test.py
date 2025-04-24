@@ -81,13 +81,48 @@ def get_dataset(dataset_type:str, test:bool, model_type:str, n_sensors:int, devi
 
     return src_dataset, tgt_dataset, combined_dataset
 
+# ---------------------------------------------------------------------
+# Utility: randomly keep (100‑p)% of the source sensors in a batch
+def _apply_sensor_dropoff(src_xs: torch.Tensor,
+                          src_ys: torch.Tensor,
+                          percent: float,
+                          keep_shape: bool = False):
+    if percent <= 0.0:
+        return src_xs, src_ys
+    n_total = src_xs.shape[1]
+    keep = max(1, int(n_total * (1.0 - percent / 100.0)))
+    idx = torch.randperm(n_total, device=src_xs.device)[:keep]
+    xs_kept = src_xs[:, idx, :]
+    ys_kept = src_ys[:, idx, :]
+
+    if not keep_shape:
+        return xs_kept, ys_kept
+
+    # Pad back to original length by duplicating kept sensors
+    n_pad = n_total - keep
+    if n_pad > 0:
+        idx_pad = torch.randint(0, keep, (n_pad,), device=src_xs.device)
+        xs_pad = xs_kept[:, idx_pad, :]
+        ys_pad = ys_kept[:, idx_pad, :]
+        xs_new = torch.cat([xs_kept, xs_pad], dim=1)
+        ys_new = torch.cat([ys_kept, ys_pad], dim=1)
+        # Shuffle sensors so duplicates are not clustered
+        perm = torch.randperm(n_total, device=src_xs.device)
+        xs_new = xs_new[:, perm, :]
+        ys_new = ys_new[:, perm, :]
+        return xs_new, ys_new
+    else:
+        return xs_kept, ys_kept
+# ---------------------------------------------------------------------
+
 # test any model on a dataset
 def test(model,
          testing_combined_dataset:CombinedDataset, # Renamed parameter for clarity
          callback:TensorboardCallback,
          transformation_type:str,
          train_method:str,
-         model_type:str ):
+         model_type:str,
+         sensor_dropoff_percent:float = 0.0):
     # set combined dataset to give us more testing data.
     if model_type == "matrix":
         # Ensure the testing dataset instance is used here too
@@ -99,6 +134,18 @@ def test(model,
         for test_iter in range(num_trials): # Renamed loop variable
             # Get data from the TESTING dataset
             src_xs, src_ys, tgt_xs, tgt_ys, info = testing_combined_dataset.sample(device)
+
+            # Optionally reduce the number of source sensors
+            keep_shape_flag = (
+                model_type == "deeponet"
+                and hasattr(model, "interpolate_sensor_gaps")
+                and (not model.interpolate_sensor_gaps)
+            )
+            src_xs, src_ys = _apply_sensor_dropoff(
+                src_xs, src_ys,
+                sensor_dropoff_percent,
+                keep_shape=keep_shape_flag,
+            )
 
             # Compute y_hats for a given model type
             if model_type == "matrix":
@@ -134,7 +181,6 @@ def test(model,
 
     # Set combined dataset back to training mode for matrix method
     if model_type == "matrix":
-        # Use the testing dataset instance
         testing_combined_dataset.calibration_only = True
 
 
@@ -142,7 +188,7 @@ def test(model,
 # parse args
 parser = argparse.ArgumentParser()
 parser.add_argument("--n_basis", type=int, default=100)
-parser.add_argument("--n_sensors", type=int, default=1000)
+parser.add_argument("--n_sensors", type=int, default=1000) # 1000
 parser.add_argument("--train_method", type=str, default="least_squares")
 parser.add_argument("--epochs", type=int, default=10_000)
 parser.add_argument("--load_path", type=str, default=None)
@@ -152,14 +198,14 @@ parser.add_argument("--dataset_type", type=str, default="Derivative")
 parser.add_argument("--logdir", type=str, default="logs")
 parser.add_argument("--device", type=str, default="auto")
 parser.add_argument("--n_layers", type=int, default=4)
-parser.add_argument("--approximate_number_paramaters", type=int, default=300_000)
+parser.add_argument("--approximate_number_paramaters", type=int, default=270_000)
 # --- DeepOSet Specific Args ---
 parser.add_argument("--phi_hidden_size", type=int, default=256, help="Hidden size for DeepOSet phi network")
 parser.add_argument("--rho_hidden_size", type=int, default=256, help="Hidden size for DeepOSet rho network")
 parser.add_argument("--trunk_hidden_size", type=int, default=256, help="Hidden size for DeepOSet trunk network")
 parser.add_argument("--pos_encoding_type", type=str, default='skip', choices=['mlp', 'sinusoidal', 'skip'], help="Type of positional encoding for DeepOSet ('mlp', 'sinusoidal', or 'skip' to use raw positions)")
 parser.add_argument("--pos_encoding_dim", type=int, default=64, help="Dimension for MLP positional encoding output (concatenate) or sinusoidal features (film)") # default 64
-parser.add_argument("--pos_encoding_max_freq", type=float, default=100.0, help="Maximum frequency/scale for sinusoidal positional encoding in DeepOSet") # Make this 10.0
+parser.add_argument("--pos_encoding_max_freq", type=float, default=0.01, help="Maximum frequency/scale for sinusoidal positional encoding in DeepOSet") # Make this 10.0
 parser.add_argument("--encoding_strategy", type=str, default="concatenate",
                    choices=['concatenate', 'film'], # Removed 'function_encoder'
                    help="Encoding strategy for DeepOSet branch ('concatenate' or 'film')")
@@ -169,7 +215,7 @@ parser.add_argument("--phi_output_size", type=int, default=32, # default 32
 parser.add_argument("--aggregation_type", type=str, default="mean",
                     choices=["mean", "attention"],
                     help="Sensor aggregation method for DeepOSet branch ('mean' or 'attention')")
-parser.add_argument("--attention_n_tokens", type=int, default=8,
+parser.add_argument("--attention_n_tokens", type=int, default=1,
                     help="Number of learnable query tokens if aggregation_type='attention'")
 # --- End DeepOSet Specific Args ---
 parser.add_argument("--unfreeze_sensors", action="store_true")
@@ -179,6 +225,15 @@ parser.add_argument("--lr_schedule_gammas", type=float, nargs='+', default=[0.2,
 parser.add_argument("--test_variable_sensors", action="store_true", help="If set, train with fixed source sensors (unless --unfreeze_sensors) and variable target queries, but test with variable source sensors and variable target queries.")
 parser.add_argument("--no_copy_sensors_to_test", action="store_true",
                    help="If set, sensor locations will not be copied from training to testing, allowing fully independent test sensor locations.")
+parser.add_argument("--test_source_sensor_dropoff", type=float, default=0.0,
+                    help="Percentage (0‑100) of SOURCE sensors to randomly drop during TESTING.")
+parser.add_argument("--train_source_sensor_dropoff", type=float, default=0.0,
+                    help="Percentage (0‑100) of SOURCE sensors to randomly drop (and pad back) during TRAINING.")
+parser.add_argument("--disable_sensor_interpolation", action="store_true",
+                    help="If set, DeepONet will NOT interpolate/pad missing "
+                         "sensors; batches must keep the original number of "
+                         "sensors (use --train_source_sensor_dropoff with "
+                         "'keep‑shape' logic).")
 
 args = parser.parse_args()
 assert args.model_type in ["SVD", "Eigen", "matrix", "deeponet", "deeponet_cnn", "deeponet_pod", "deeponet_2stage", "deeponet_2stage_cnn", "deeposet"]
@@ -199,6 +254,14 @@ if args.model_type == "deeposet" and args.encoding_strategy == "film":
     # Positional encoding must be enabled for FiLM
     # We can enforce this or rely on the check within DeepOSet.__init__
     pass # DeepOSet init handles this check
+
+# Validate drop‑off argument
+if not (0.0 <= args.test_source_sensor_dropoff < 100.0):
+    parser.error("--test_source_sensor_dropoff must be in the range [0, 100).")
+
+# Validate new training flag
+if not (0.0 <= args.train_source_sensor_dropoff < 100.0):
+    parser.error("--train_source_sensor_dropoff must be in the range [0, 100).")
 
 # hyper params
 epochs = args.epochs
@@ -443,18 +506,19 @@ elif args.model_type == "deeponet":
     schedule_steps = args.lr_schedule_steps if args.use_lr_schedule else None
     schedule_gammas = args.lr_schedule_gammas if args.use_lr_schedule else None
 
-    model = DeepONet(input_size_tgt=tgt_dataset.input_size[0],
-                     output_size_tgt=tgt_dataset.output_size[0],
-                     input_size_src=src_dataset.input_size[0],
-                     output_size_src=src_dataset.output_size[0],
-                     n_input_sensors=combined_dataset.n_examples_per_sample,
-                     p=n_basis,
-                     n_layers=n_layers,
-                     hidden_size=hidden_size,
-                     # Pass the schedule parameters (could be None)
-                     lr_schedule_steps=schedule_steps,
-                     lr_schedule_gammas=schedule_gammas
-                     ).to(device)
+    model = DeepONet(
+        input_size_tgt=tgt_dataset.input_size[0],
+        output_size_tgt=tgt_dataset.output_size[0],
+        input_size_src=src_dataset.input_size[0],
+        output_size_src=src_dataset.output_size[0],
+        n_input_sensors=combined_dataset.n_examples_per_sample,
+        p=n_basis,
+        n_layers=n_layers,
+        hidden_size=hidden_size,
+        lr_schedule_steps=schedule_steps,
+        lr_schedule_gammas=schedule_gammas,
+        interpolate_sensor_gaps=not args.disable_sensor_interpolation
+    ).to(device)
 elif args.model_type == "deeposet":
     # Conditionally set schedule parameters based on the flag
     schedule_steps = args.lr_schedule_steps if args.use_lr_schedule else None
@@ -493,20 +557,8 @@ else:
 
 # get number of parameters
 n_params = get_num_parameters(model)
-# The prediction function needs the individual hidden sizes for DeepOSet now,
-# or we can skip the check for DeepOSet if predict_number_params isn't updated.
-# Let's skip the check for simplicity for now.
-if args.model_type != "deeposet":
-    # For other models, hidden_size was calculated and can be used
-    predict_n_params = predict_number_params(model_type, combined_dataset.n_examples_per_sample, n_basis, hidden_size, n_layers, src_dataset.input_size, src_dataset.output_size, tgt_dataset.input_size, tgt_dataset.output_size, transformation_type, dataset_type)
-    assert n_params == predict_n_params, f"Number of parameters is not consistent for {model_type}, expected {predict_n_params}, got {n_params}."
-else:
-    # For DeepOSet, we used direct hidden sizes.
-    # We could update predict_number_params or just print the count.
-    print(f"DeepOSet model created with {n_params} parameters.")
-    # Optionally, update predict_number_params to accept phi/rho/trunk sizes
-    # predict_n_params = predict_number_params_deeposet(...) # Hypothetical updated function
-    # assert n_params == predict_n_params, "..."
+# Print the number of parameters for all model types
+print(f"{args.model_type.upper()} model created with {n_params} parameters.")
 
 # writes all parameters and saves them
 params = {"seed": seed,
@@ -594,7 +646,13 @@ else: # train models
     # train and test occasionally
     if args.model_type == "matrix" and transformation_type == "linear":
         model["A"] = compute_A(model["src"], model["tgt"], combined_dataset, device, args.train_method, callback)
-    test(model, testing_combined_dataset, callback2 if args.model_type == "matrix" else callback, transformation_type, args.train_method, args.model_type)
+    test(model,
+         testing_combined_dataset,
+         callback2 if args.model_type == "matrix" else callback,
+         transformation_type,
+         args.train_method,
+         args.model_type,
+         sensor_dropoff_percent=args.test_source_sensor_dropoff)
     num_tests = 100 if epochs > 0 else 0
     for iteration in trange(num_tests):
 
@@ -615,7 +673,13 @@ else: # train models
             model.train_model(combined_dataset, epochs=epochs//num_tests, callback=callback, progress_bar=False)
 
         # testing step.
-        test(model, testing_combined_dataset, callback2 if args.model_type == "matrix" else callback, transformation_type, args.train_method, args.model_type)
+        test(model,
+             testing_combined_dataset,
+             callback2 if args.model_type == "matrix" else callback,
+             transformation_type,
+             args.train_method,
+             args.model_type,
+             sensor_dropoff_percent=args.test_source_sensor_dropoff)
 
 
 
@@ -744,7 +808,7 @@ with torch.no_grad():
         if args.model_type == "matrix":
             y_hats = model["tgt"].predict_from_examples(example_xs, example_ys, xs, method=args.train_method)
         else:
-            y_hats = model.predict_from_examples(example_xs, example_ys, xs, method=args.train_method, representation_dataset="target", prediction_dataset="target")
+            y_hats = model.forward(example_xs, example_ys, xs)
 
         # plot target domain
         plot_target(xs, ys, y_hats, info, logdir)
@@ -830,19 +894,34 @@ with torch.no_grad():
     else: # deeponet*, deeposet
         y_hats = model.forward(example_xs, example_ys, xs)
 
+    # --- Capture interpolation info AFTER the forward pass with TEST data ---
+    interpolation_info_test = (
+        model.get_last_interpolation_info()
+        if model_type == "deeponet" else None
+    )
+
     # plot
     if not (args.dataset_type in ["Heat", "Burger"] and args.model_type == "deeponet_pod"): # POD cannot be called on new inputs, so it cannot plot.
-        plot_transformation(grid, grid_outs, example_y_hats, xs, ys, y_hats, info, logdir)
+        plot_transformation(grid, grid_outs, example_y_hats, xs, ys, y_hats, info, logdir, interpolation_info=interpolation_info_test)
 
 
 # plot transformation for all model types using TESTING data
 print("\nGenerating transformation plot using TESTING dataset...")
-example_xs_test, example_ys_test, xs_test, ys_test, info_test = testing_combined_dataset.sample(device) # Use testing dataset
+example_xs_test, example_ys_test, xs_test, ys_test, info_test = testing_combined_dataset.sample(device)
 info_test["model_type"] = f"{model_type}_{args.train_method}" if model_type in ["SVD", "Eigen", "matrix"] else model_type
 plot_test_example_xs_id = id(example_xs_test)
 print(f"  Plotting Test Data: example_xs_test ID: {plot_test_example_xs_id}, Shape: {example_xs_test.shape}, First val: {example_xs_test.flatten()[0].item():.4f}")
 
-# --- Predict using TESTING data ---
+# --- honour sensor drop‑off here as well ---
+example_xs_test, example_ys_test = _apply_sensor_dropoff(
+    example_xs_test, example_ys_test,
+    args.test_source_sensor_dropoff,
+    keep_shape=(
+        args.model_type == "deeponet" and args.disable_sensor_interpolation
+    ),
+)
+
+# --- Predict using TESTING data (and get example_y_hats if needed) ---
 example_y_hats_test = None
 y_hats_test = None
 with torch.no_grad():
@@ -862,7 +941,7 @@ with torch.no_grad():
 
     elif model_type == "SVD" or model_type == "Eigen":
         y_hats_test = model.predict_from_examples(example_xs_test, example_ys_test, xs_test, method=args.train_method, representation_dataset="source", prediction_dataset="target")
-        # SVD/Eigen might not have a direct source reconstruction, set example_y_hats_test if needed/possible
+        # SVD/Eigen might not have a direct source reconstruction, set example_y_hats_test if needed
         # example_y_hats_test = model.predict_from_examples(example_xs_test, example_ys_test, example_xs_test, ...) # Example
 
     elif model_type == "deeponet_2stage":
@@ -882,20 +961,28 @@ with torch.no_grad():
         # Predict source reconstruction (if the model supports/needs it for plotting)
         # example_y_hats_test = model.forward(example_xs_test, example_ys_test, example_xs_test) # Example
 
+    # --- Capture interpolation info AFTER the forward pass with TEST data ---
+    interpolation_info_test = (
+        model.get_last_interpolation_info()
+        if model_type == "deeponet" else None
+    )
+
 # --- Call Plotting Function for TESTING data ---
 # mountain car plot needs a 2d grid instead of the random data, for plotting purposes.
 if args.dataset_type == "MountainCar":
-    plot_transformation_mountain_car(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+    plot_transformation_mountain_car(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir, interpolation_info=interpolation_info_test)
 elif args.dataset_type == "QuadraticSin":
-    plot_transformation_quadratic_sin(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+    plot_transformation_quadratic_sin(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir, interpolation_info=interpolation_info_test)
 elif args.dataset_type == "Derivative":
-    plot_transformation_derivative(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+    plot_transformation_derivative(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir, interpolation_info=interpolation_info_test)
 elif args.dataset_type == "Integral":
-    plot_transformation_integral(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+    # Pass interpolation_info_test here
+    plot_transformation_integral(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir, interpolation_info=interpolation_info_test)
 elif args.dataset_type == "Elastic":
-    plot_transformation_elastic(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+    # Pass interpolation_info_test here
+    plot_transformation_elastic(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir, interpolation_info=interpolation_info_test)
 elif args.dataset_type == "Darcy":
-    plot_transformation_darcy(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
+    plot_transformation_darcy(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir, interpolation_info=interpolation_info_test)
 elif args.dataset_type == "Heat":
     plot_transformation_heat(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
 elif args.dataset_type == "LShaped":
@@ -904,9 +991,8 @@ elif args.dataset_type == "Burger":
     plot_transformation_burger(example_xs_test, example_ys_test, example_y_hats_test, xs_test, ys_test, y_hats_test, info_test, logdir)
 
 
-# --- NEW SECTION: Plot transformation using TRAINING data ---
+# plot transformation for all model types using TRAINING data
 print("\nGenerating transformation plot using TRAINING dataset...")
-# Sample training data AGAIN for plotting
 example_xs_train, example_ys_train, xs_train, ys_train, info_train = combined_dataset.sample(device)
 info_train["model_type"] = f"{model_type}_{args.train_method}" if model_type in ["SVD", "Eigen", "matrix"] else model_type
 plot_train_example_xs_id = id(example_xs_train)
@@ -948,6 +1034,12 @@ with torch.no_grad():
         y_hats_train = model.forward(example_xs_train, example_ys_train, xs_train)
         # example_y_hats_train = model.forward(example_xs_train, example_ys_train, example_xs_train) # Predict source if needed
 
+    # --------------- capture interpolation info for TRAIN batch ----------
+    interpolation_info_train = (
+        model.get_last_interpolation_info()
+        if model_type == "deeponet" else None
+    )
+
 # --- Call Plotting Function for TRAINING data ---
 # Create a subdirectory for these plots
 train_plot_logdir = os.path.join(logdir, "train_sensor_plots")
@@ -959,11 +1051,17 @@ if args.dataset_type == "MountainCar":
 elif args.dataset_type == "QuadraticSin":
     plot_transformation_quadratic_sin(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
 elif args.dataset_type == "Derivative":
-    plot_transformation_derivative(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+    plot_transformation_derivative(example_xs_train, example_ys_train,
+                                   example_y_hats_train,
+                                   xs_train, ys_train, y_hats_train,
+                                   info_train, train_plot_logdir,
+                                   interpolation_info=interpolation_info_train)
 elif args.dataset_type == "Integral":
-    plot_transformation_integral(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+    # Pass interpolation_info_train here
+    plot_transformation_integral(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir, interpolation_info=interpolation_info_train)
 elif args.dataset_type == "Elastic":
-    plot_transformation_elastic(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
+    # Pass interpolation_info_train here
+    plot_transformation_elastic(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir, interpolation_info=interpolation_info_train)
 elif args.dataset_type == "Darcy":
     plot_transformation_darcy(example_xs_train, example_ys_train, example_y_hats_train, xs_train, ys_train, y_hats_train, info_train, train_plot_logdir)
 elif args.dataset_type == "Heat":
@@ -975,7 +1073,28 @@ elif args.dataset_type == "Burger":
 
 print(f"Training sensor plots saved in: {train_plot_logdir}")
 
-# --- End of Script ---
+# ---------------------------------------------------------------------
+#  Inject training‑time drop‑off (with shape preservation)
+# ---------------------------------------------------------------------
+if args.train_source_sensor_dropoff > 0.0:
+    import types
+    _orig_sample = combined_dataset.sample
 
+    def _sample_with_dropoff(self, device, *sargs, **skwargs):
+        src_xs, src_ys, tgt_xs, tgt_ys, info = _orig_sample(device, *sargs, **skwargs)
+        src_xs, src_ys = _apply_sensor_dropoff(
+            src_xs, src_ys,
+            percent=args.train_source_sensor_dropoff,
+            keep_shape=(
+                args.model_type == "deeponet" and args.disable_sensor_interpolation
+            ),
+        )
+        return src_xs, src_ys, tgt_xs, tgt_ys, info
+
+    combined_dataset.sample = types.MethodType(_sample_with_dropoff, combined_dataset)
+# ---------------------------------------------------------------------
+
+# --- End of Script ---
+# here yse
 
 

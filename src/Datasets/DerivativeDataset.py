@@ -1,6 +1,7 @@
 from typing import Tuple, Union
 
 import torch
+import numpy as np
 
 from FunctionEncoder.Dataset.BaseDataset import BaseDataset
 from matplotlib import pyplot as plt
@@ -140,7 +141,9 @@ def plot_target_cubic_derivative(xs, ys, y_hats, info, logdir):
     plt.savefig(f"{logdir}/target.png")
     plt.clf()
 
-def plot_transformation_derivative(example_xs, example_ys, example_y_hats, xs, ys, y_hats, info, logdir):
+def plot_transformation_derivative(example_xs, example_ys, example_y_hats,
+                                   xs, ys, y_hats, info, logdir,
+                                   interpolation_info=None):
     size = 5
 
     # ploting info
@@ -158,19 +161,45 @@ def plot_transformation_derivative(example_xs, example_ys, example_y_hats, xs, y
     ys = ys.gather(dim=-2, index=indicies)
     y_hats = y_hats.gather(dim=-2, index=indicies)
 
-
     for row in range(example_xs.shape[0]):
+        marker_label_added = False          # ← reset for each figure
+
         fig = plt.figure(figsize=(2.2 * size, 1 * size), dpi=300)
         gridspec = fig.add_gridspec(1, 2, width_ratios=[1, 1])
         axs = gridspec.subplots()
 
         # plot source function
         ax = axs[0]
-        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color="black")
+        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(),
+                label="Groundtruth", color="black")
         if example_y_hats is not None:
-            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
-        # Add scatter plot for every 50th sample point in the source plot
-        ax.scatter(example_xs[row, ::5].cpu(), example_ys[row, ::5].cpu(), label="Source Samples", color='green', marker='o', s=50, zorder=5)
+            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(),
+                    label=label, color=color)
+        # Kept source samples
+        #ax.scatter(example_xs[row, ::].cpu(), example_ys[row, ::].cpu(),  #  it was ::5 uncomment to plot source samples (green dots)
+        #           label="Source Samples", color='green', marker='o', s=50, zorder=5)
+
+        # ---------- highlight dropped / interpolated sensors ----------
+        if interpolation_info is not None:
+            # Grab info straight from the model
+            sensor_xs = interpolation_info["sensor_xs"].cpu().numpy().squeeze(-1)    # (m,)
+            full_u    = interpolation_info["full_u"][row, :, 0].cpu().numpy()        # (m,)
+            is_missing = interpolation_info["mask"][row].cpu().numpy().astype(bool)  # (m,)
+
+            if is_missing.any():                       # draw only if missing
+                ax.scatter(
+                    sensor_xs[is_missing],
+                    full_u[is_missing],
+                    marker='X',
+                    s=250,
+                    facecolors='red',
+                    edgecolors='black',
+                    linewidths=1.2,
+                    zorder=20,
+                    label="Interpolated sensors" if not marker_label_added else None,
+                )
+                marker_label_added = True
+
         title = f"${info['As'][row].item():.2f}x^3 + {info['Bs'][row].item():.2f}x^2 + {info['Cs'][row].item():.2f}x + {info['Ds'][row].item():.2f}$"
         ax.set_title(title)
         ax.legend() # Add legend to the first plot as well
@@ -190,7 +219,7 @@ def plot_transformation_derivative(example_xs, example_ys, example_y_hats, xs, y
         ax.plot(xs[row].cpu(), ys[row].cpu(), label="Groundtruth", color="black")
         ax.plot(xs[row].cpu(), y_hats[row].cpu(), label=label, color=color)
         # Add scatter plot for every 50th sample point in the target plot
-        ax.scatter(xs[row, ::5].cpu(), ys[row, ::5].cpu(), label="Target Samples", color='red', marker='x', s=50, zorder=5)
+        # ax.scatter(xs[row, ::5].cpu(), ys[row, ::5].cpu(), label="Target Samples", color='red', marker='x', s=50, zorder=5) # uncomment to plot target samples
         title = f"$3*{info['As'][row].item():.2f}x^2 + 2*{info['Bs'][row].item():.2f}x + {info['Cs'][row].item():.2f}$"
         ax.set_title(title)
         ax.legend()

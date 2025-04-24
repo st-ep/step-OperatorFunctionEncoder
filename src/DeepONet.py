@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F   #  <-- NEW
 from FunctionEncoder import BaseDataset, BaseCallback
 from tqdm import trange
 from torch.optim.lr_scheduler import _LRScheduler # Import base class for type hinting if needed
@@ -19,7 +20,9 @@ class DeepONet(torch.nn.Module):
                  n_layers=4,
                  initial_lr=5e-4,     # Initial learning rate (matches DeepOSet default)
                  lr_schedule_steps=None, # Steps for LR decay (optional)
-                 lr_schedule_gammas=None # Multiplicative factor for each step (optional)
+                 lr_schedule_gammas=None, # Multiplicative factor for each step (optional)
+                 weight_decay=0.0,           # Weight decay for Adam
+                 interpolate_sensor_gaps=True  # <‑‑ NEW FLAG
                  ):
         super().__init__()
 
@@ -35,10 +38,12 @@ class DeepONet(torch.nn.Module):
         self.n_layers = n_layers
 
         # Store LR schedule parameters
+        self.weight_decay = weight_decay
         self.initial_lr = initial_lr
         self.lr_schedule_steps = None
         self.lr_schedule_rates = None
         self.lr_schedule_gammas = None # Store gammas as well
+        self.interpolate_sensor_gaps = interpolate_sensor_gaps   # <‑‑ STORE
         if lr_schedule_steps is not None:
             if lr_schedule_gammas is None or len(lr_schedule_steps) != len(lr_schedule_gammas):
                 raise ValueError("lr_schedule_gammas must be provided and have the same length as lr_schedule_steps if scheduling is used.")
@@ -76,7 +81,7 @@ class DeepONet(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.randn(output_size_tgt) * 0.1) if use_deeponet_bias else None
 
         # create optimizer with the initial learning rate
-        self.opt = torch.optim.Adam(self.parameters(), lr=self.initial_lr)
+        self.opt = torch.optim.Adam(self.parameters(), lr=self.initial_lr, weight_decay=self.weight_decay)
 
         # Initialize step counter for LR scheduling
         self.total_steps = 0
@@ -85,10 +90,161 @@ class DeepONet(torch.nn.Module):
         self.method = "deepONet"
         self.average_function = None
 
-    def forward_branch(self, u):
-        ins = u.reshape(u.shape[0], -1)
+        self._last_interpolated_u    = None    # for plotting
+        self._last_interpolated_mask = None
+        self._sensor_positions       = None    # saved once (training grid)
+
+    def forward_branch(self, u, xs_pos):
+        """
+        Compute branch output B(u) while gracefully handling cases where the
+        number of provided sensors differs from the number used in training
+        (self.n_input_sensors).
+
+        If fewer sensors are given, we pad the missing ones by a simple
+        interpolation strategy: fill with the mean value of the available
+        sensors.  If more sensors are supplied we truncate the extras.
+        """
+        batch_size, n_sensors_current, _ = u.shape
+
+        # ---------------------------------------------------------------
+        # EARLY EXIT if user disabled interpolation / resampling
+        # ---------------------------------------------------------------
+        if not self.interpolate_sensor_gaps:
+            if n_sensors_current != self.n_input_sensors:
+                raise ValueError(
+                    f"DeepONet: got {n_sensors_current} sensors but "
+                    f"interpolate_sensor_gaps=False (expected "
+                    f"{self.n_input_sensors}).  Either supply exactly the "
+                    f"training count or enable interpolation."
+                )
+
+            # -----------------------------------------------------------
+            # Save reference grid *once* so that plotting functions can
+            # access it later (needed for red‑X markers).
+            # -----------------------------------------------------------
+            if (
+                self._sensor_positions is None
+                and xs_pos is not None
+                and xs_pos.shape[1] == self.n_input_sensors
+            ):
+                # assume xs_pos identical across batch
+                self._sensor_positions = xs_pos[0].detach().clone()
+
+            # record empty mask for plotting
+            missing_mask = torch.zeros(
+                batch_size, self.n_input_sensors, dtype=torch.bool,
+                device=u.device
+            )
+            self._last_interpolated_u    = u.detach()
+            self._last_interpolated_mask = missing_mask
+
+            ins  = u.reshape(batch_size, -1)
+            outs = self.branch(ins).reshape(batch_size, -1, self.output_size_tgt)
+            return outs
+
+        # ---------------------------------------------------------------
+        # Save the _reference_ grid **only** if we see the complete grid
+        # ---------------------------------------------------------------
+        if (
+            self._sensor_positions is None
+            and xs_pos is not None
+            and xs_pos.shape[1] == self.n_input_sensors
+        ):
+            # assume xs_pos is identical for every sample in the batch
+            self._sensor_positions = xs_pos[0].detach().clone()  # (m, input_dim)
+
+        # ------------------------------------------------------------------
+        # 1‑D linear interpolation / resampling along the sensor dimension.
+        # If the number of sensors differs from training, we resample u so
+        # that it has exactly `self.n_input_sensors` entries.  This means
+        # every "hole" is filled with the mean of its neighbouring sensors.
+        # ------------------------------------------------------------------
+        if n_sensors_current == self.n_input_sensors:
+            # nothing to do
+            missing_mask = torch.zeros(
+                batch_size, self.n_input_sensors, dtype=torch.bool,
+                device=u.device
+            )
+
+        elif (
+            self._sensor_positions is None
+            or self._sensor_positions.shape[0] != self.n_input_sensors
+        ):
+            # ----------------------------------------------------------------
+            # Fallback: we don't know / don't trust full grid, use 1‑D
+            # interpolation exactly like the earlier simple version.
+            # ----------------------------------------------------------------
+            u = u.permute(0, 2, 1)  # (B, C, L)
+            mode = "linear" if n_sensors_current > 1 else "nearest"
+            u = F.interpolate(
+                u,
+                size=self.n_input_sensors,
+                mode=mode,
+                align_corners=False if mode == "linear" else None,
+            ).permute(0, 2, 1)       # (B, m, C)
+
+            # we mark *all* padded positions as "missing"
+            # (use batch dimension so that shape is always (B , m))
+            missing_mask = torch.ones(
+                batch_size, self.n_input_sensors, dtype=torch.bool,
+                device=u.device
+            )
+
+        else:
+            # ---------- robust index‑based mapping -------------------------
+            m = self.n_input_sensors
+            full_u       = u.new_empty(batch_size, m, self.output_size_src)
+            missing_mask = torch.zeros(batch_size, m, dtype=torch.bool,
+                                       device=u.device)
+
+            # reference grid & helpful sorted order
+            ref_x  = self._sensor_positions.squeeze(-1)        # (m,)
+            order  = torch.argsort(ref_x)                      # ascending by x
+            invord = torch.argsort(order)                      # to unsort later
+            ref_x_sorted = ref_x[order]                       # (m,)
+
+            for b in range(batch_size):
+                # ---------- place available sensors ----------
+                diff = torch.cdist(
+                    self._sensor_positions.unsqueeze(0),
+                    xs_pos[b].detach().unsqueeze(0)
+                ).squeeze(0)                                   # (m , n_curr)
+                nearest_ref = diff.argmin(dim=0)               # (n_curr,)
+
+                full_u[b].fill_(float('nan'))
+                full_u[b].index_copy_(0, nearest_ref, u[b])    # put known sensors
+
+                # ---------- interpolate missing (sorted grid) ----------
+                fu_sorted = full_u[b][order]                   # (m, C) sorted
+                present   = ~torch.isnan(fu_sorted[:, 0])
+                missing   = ~present
+
+                # remember mask in *original* order
+                missing_mask[b] = missing.clone()[invord]
+
+                if missing.any():
+                    pres_idx = torch.where(present)[0]
+                    for mi in torch.where(missing)[0]:
+                        # left/right neighbour indices among PRESENT points
+                        left_idx  = pres_idx[pres_idx < mi].max() if (pres_idx < mi).any() else pres_idx.min()
+                        right_idx = pres_idx[pres_idx > mi].min() if (pres_idx > mi).any() else pres_idx.max()
+                        xl, xr = ref_x_sorted[left_idx], ref_x_sorted[right_idx]
+                        t = (ref_x_sorted[mi] - xl) / (xr - xl + 1e-12)
+                        fu_sorted[mi] = (1 - t) * fu_sorted[left_idx] + t * fu_sorted[right_idx]
+
+                # unsort to original grid
+                full_u[b] = fu_sorted[invord]
+
+            u = full_u
+
+        # -------------  Store for later visualisation ------------------
+        self._last_interpolated_u    = u.detach()
+        self._last_interpolated_mask = missing_mask.detach()   # (B , m)
+
+        # Flat vector for the branch MLP
+        ins = u.reshape(batch_size, -1)       # (B, n_input_sensors*output_size_src)
         outs = self.branch(ins)
-        outs = outs.reshape(outs.shape[0], -1, self.output_size_tgt)
+        outs = outs.reshape(batch_size, -1, self.output_size_tgt)
         return outs
 
     def forward_trunk(self, y):
@@ -100,7 +256,7 @@ class DeepONet(torch.nn.Module):
         # xs are not actually used for deeponet, but we keep them to be consistent with the function encoder
         # us are the values of u at the input sensors
         # ys are the locations of the output sensors.
-        b = self.forward_branch(us)
+        b = self.forward_branch(us, xs)
         t = self.forward_trunk(ys)
 
         # this is just the dot product, but allowing for the output dim to be > 1
@@ -214,6 +370,20 @@ class DeepONet(torch.nn.Module):
             params["lr_schedule_steps"] = str(self.lr_schedule_steps)
         if self.lr_schedule_gammas is not None:
              params["lr_schedule_gammas"] = str(self.lr_schedule_gammas)
+        params["weight_decay"] = self.weight_decay
+        params["interpolate_sensor_gaps"] = self.interpolate_sensor_gaps
         params = {k: str(v) for k, v in params.items()}
         return params
+
+    # ------------------------------------------------------------------
+    # Information for plotting (called after a forward pass)
+    # ------------------------------------------------------------------
+    def get_last_interpolation_info(self):
+        if self._last_interpolated_u is None:
+            return None
+        return {
+            "full_u":   self._last_interpolated_u,       # (B, m, out_dim)
+            "mask":     self._last_interpolated_mask,    # (B , m)
+            "sensor_xs":self._sensor_positions           # (m, input_dim)
+        }
 

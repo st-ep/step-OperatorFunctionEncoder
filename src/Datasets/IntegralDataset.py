@@ -71,20 +71,11 @@ def plot_target_quadratic_integral(xs, ys, y_hats, info, logdir):
     plt.savefig(f"{logdir}/target.png")
     plt.clf()
 
-def plot_transformation_integral(example_xs, example_ys, example_y_hats, xs, ys, y_hats, info, logdir):
+def plot_transformation_integral(example_xs, example_ys, example_y_hats,
+                                   xs, ys, y_hats, info, logdir,
+                                   interpolation_info=None):
     size = 5
     # Define colors for different model types
-    colors = {
-        "SVD_least_squares": "blue",
-        "Eigen_least_squares": "green",
-        "matrix_least_squares": "red",
-        "deeponet": "purple",
-        "deeponet_cnn": "orange",
-        "deeponet_pod": "brown",
-        "deeponet_2stage": "pink",
-        "deeponet_2stage_cnn": "gray",
-        "deeposet": "cyan",
-    }
     model_type = info["model_type"]
     color = colors[model_type]
     label = labels[model_type]
@@ -100,32 +91,59 @@ def plot_transformation_integral(example_xs, example_ys, example_y_hats, xs, ys,
     y_hats = y_hats.gather(dim=-2, index=indicies)
 
     for row in range(example_xs.shape[0]):
+        marker_label_added = False          # ← reset for each figure
+
         fig = plt.figure(figsize=(2.2 * size, 1 * size), dpi=300)
         gridspec = fig.add_gridspec(1, 2, width_ratios=[1, 1])
         axs = gridspec.subplots()
 
-        # plot
+        # plot source function
         ax = axs[0]
-        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color="black")
+        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(),
+                label="Groundtruth", color="black")
         if example_y_hats is not None:
-            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
+            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(),
+                    label=label, color=color)
+        # Kept source samples (optional)
+        #ax.scatter(example_xs[row, ::].cpu(), example_ys[row, ::].cpu(),
+        #           label="Source Samples", color='green', marker='o', s=50, zorder=5)
+
+        # ---------- highlight dropped / interpolated sensors ----------
+        if interpolation_info is not None:
+            # Grab info straight from the model
+            sensor_xs = interpolation_info["sensor_xs"].cpu().numpy().squeeze(-1)    # (m,)
+            full_u    = interpolation_info["full_u"][row, :, 0].cpu().numpy()        # (m,)
+            is_missing = interpolation_info["mask"][row].cpu().numpy().astype(bool)  # (m,)
+
+            if is_missing.any():                       # draw only if missing
+                ax.scatter(
+                    sensor_xs[is_missing],
+                    full_u[is_missing],
+                    marker='X',
+                    s=250,
+                    facecolors='red',
+                    edgecolors='black',
+                    linewidths=1.2,
+                    zorder=20,
+                    label="Interpolated sensors" if not marker_label_added else None,
+                )
+                marker_label_added = True
+        # ---------------------------------------------------------------
+
         title = f"${info['As'][row].item():.2f}x^2 + {info['Bs'][row].item():.2f}x + {info['Cs'][row].item():.2f}$"
         ax.set_title(title)
+        ax.legend() # Add legend to the first plot
 
 
-        # add an arrow to the middle column
-        # and a T right above it
-        # ax = axs[row, 1]
-        # ax.arrow(0, 0, 0.25, 0.0, head_width=0.1, head_length=0.1, fc='black', ec='black', lw=15)
-        # ax.text(0.1, 0.1, "T", fontsize=30)
-        # ax.set_xlim(0, 0.5)
-        # ax.set_ylim(-0.3, 0.3)
-        # ax.axis("off")
+        # add an arrow to the middle column (optional)
+        # ...
 
-        # plot
+        # plot target function
         ax = axs[1]
         ax.plot(xs[row].cpu(), ys[row].cpu(), label="Groundtruth", color="black")
         ax.plot(xs[row].cpu(), y_hats[row].cpu(), label=label, color=color)
+        # Add scatter plot for target samples (optional)
+        # ax.scatter(xs[row, ::5].cpu(), ys[row, ::5].cpu(), label="Target Samples", color='red', marker='x', s=50, zorder=5)
         a_string = f"{info['As'][row].item():.2f}"
         b_string = f"{info['Bs'][row].item():.2f}"
         c_string = f"{info['Cs'][row].item():.2f}"
@@ -136,3 +154,4 @@ def plot_transformation_integral(example_xs, example_ys, example_y_hats, xs, ys,
         plt.tight_layout()
         plot_name = f"{logdir}/qualitative_Integral_{label.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')}_{row}.pdf"
         plt.savefig(plot_name)
+        plt.close(fig) # Close the figure after saving

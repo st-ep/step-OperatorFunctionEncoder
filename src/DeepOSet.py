@@ -31,11 +31,6 @@ class DeepOSet(torch.nn.Module):
                  film_modulation_dim=None, # Dimension for FiLM modulation (defaults to phi_hidden_size)
                  aggregation_type: str = "mean",  # 'mean' or 'attention'
                  attention_n_tokens: int = 8,     # k – number of learnable query tokens
-                 # Removed function encoder parameters:
-                 # function_encoder_model=None,
-                 # fe_n_basis=11,
-                 # fe_concat_mode='concat_u',
-                 # fe_arch="MLP"
                  ):
         super().__init__()
 

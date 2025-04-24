@@ -7,7 +7,7 @@ colors = {
     "deeponet_pod": "#04b306",
     "deeponet_2stage": "#ff8c00",
     "deeponet_2stage_cnn": "#d6ac04",
-    "deeposet": "cyan",
+    "deeposet": "purple",
 }
 labels = {
     "SVD_least_squares": "SVD",
@@ -18,7 +18,7 @@ labels = {
     "deeponet_pod": "DeepONet POD",
     "deeponet_2stage": "DeepONet 2-stage",
     "deeponet_2stage_cnn": "DeepONet 2-stage (CNN)",
-    "deeposet": "DeepOSet",
+    "deeposet": "SetONet",
 }
 titles = {
     "Derivative": "Derivative",

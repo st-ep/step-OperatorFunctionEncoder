@@ -247,13 +247,31 @@ def plot_target_darcy(xs, ys, y_hats, info, logdir):
     plt.clf()
 
 
-def plot_transformation_darcy(example_xs, example_ys, example_y_hats, xs, ys, y_hats, info, logdir):
+def plot_transformation_darcy(example_xs, example_ys, example_y_hats,
+                              xs, ys, y_hats,
+                              info, logdir,
+                              interpolation_info=None):
     size = 5
     model_type = info["model_type"]
     color = colors[model_type]
     label = labels[model_type]
 
+    # -----------------------------------------------------------
+    # 1)  Sort all tensors along the sensor dimension (‑2) once.
+    #     This yields clean, monotone curves in the figures.
+    # -----------------------------------------------------------
+    # ----- source side -----
+    example_xs, idx_sort = torch.sort(example_xs, dim=-2)
+    example_ys = example_ys.gather(dim=-2, index=idx_sort)
+    if example_y_hats is not None:
+        example_y_hats = example_y_hats.gather(dim=-2, index=idx_sort)
 
+    # ----- target side -----
+    xs, idx_sort_tgt = torch.sort(xs, dim=-2)
+    ys = ys.gather(dim=-2, index=idx_sort_tgt)
+    y_hats = y_hats.gather(dim=-2, index=idx_sort_tgt)
+
+    # -----------------------------------------------------------
     for row in range(example_xs.shape[0]):
         # create plot
         fig = plt.figure(figsize=(2.2 * size, 1 * size), dpi=300)
@@ -263,10 +281,41 @@ def plot_transformation_darcy(example_xs, example_ys, example_y_hats, xs, ys, y_
         
         # plot
         ax = axs[0]
-        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color="black")
+        marker_label_added = False        # ← reset for each figure
+
+        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(),
+                label="Groundtruth", color="black")
         if example_y_hats is not None:
-            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
-        # ax.legend()
+            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(),
+                    label=label, color=color)
+
+        # ---------- highlight dropped / interpolated sensors ----------
+        if interpolation_info is not None and interpolation_info["sensor_xs"] is not None:
+            # --- bring sensor data into the same (sorted) order as the curve ---
+            sensor_xs  = interpolation_info["sensor_xs"].cpu().numpy().squeeze(-1)   # (m,)
+            full_u     = interpolation_info["full_u"][row, :, 0].cpu().numpy()       # (m,)
+            is_missing = interpolation_info["mask"][row].cpu().numpy().astype(bool)  # (m,)
+
+            order = sensor_xs.argsort()
+            sensor_xs  = sensor_xs[order]
+            full_u     = full_u[order]
+            is_missing = is_missing[order]
+
+            if is_missing.any():  # draw only if missing
+                ax.scatter(
+                    sensor_xs[is_missing],
+                    full_u[is_missing],
+                    marker='X',
+                    s=250,
+                    facecolors='red',
+                    edgecolors='black',
+                    linewidths=1.2,
+                    zorder=20,
+                    label="Interpolated sensors" if not marker_label_added else None,
+                )
+                marker_label_added = True
+
+        ax.legend()
         ax.set_xlabel("$x$")
         ax.set_ylabel("$u(x)$")
         ax.set_title("Source term")

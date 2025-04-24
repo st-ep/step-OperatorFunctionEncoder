@@ -258,7 +258,9 @@ def plot_target_boundary(xs, ys, y_hats, info, logdir):
     plt.savefig(f"{logdir}/target.png")
     plt.clf()
 
-def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, y_hats, info, logdir):
+def plot_transformation_elastic(example_xs, example_ys, example_y_hats,
+                                xs, ys, y_hats, info, logdir,
+                                interpolation_info=None):
     size = 5
     fig = plt.figure(figsize=(4.6 * size, 1 * size), dpi=300)
 
@@ -299,27 +301,43 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
     label = labels[model_type]
 
     for row in range(example_xs.shape[0]):
-        # plot the forcing function
+        marker_label_added = False          # ← reset for each figure (for legend)
         ax = fig.add_subplot(gridspec_left[0, 0])
-        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(), label="Groundtruth", color='black')
+        ax.plot(example_xs[row].cpu(), example_ys[row].cpu(),
+                label="Groundtruth", color='black')
         if example_y_hats is not None:
-            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(), label=label, color=color)
+            ax.plot(example_xs[row].cpu(), example_y_hats[row].cpu(),
+                    label=label, color=color)
+
+        # ---------- highlight dropped / interpolated sensors ----------
+        if (
+            interpolation_info is not None
+            and interpolation_info.get("sensor_xs", None) is not None
+        ):
+            sensor_xs  = interpolation_info["sensor_xs"].cpu().numpy().squeeze(-1)
+            full_u     = interpolation_info["full_u"][row, :, 0].cpu().numpy()
+            is_missing = interpolation_info["mask"][row].cpu().numpy().astype(bool)
+
+            if is_missing.any():                       # draw only if missing
+                ax.scatter(
+                    sensor_xs[is_missing],
+                    full_u[is_missing],
+                    marker='X',
+                    s=250,
+                    facecolors='red',
+                    edgecolors='black',
+                    linewidths=1.2,
+                    zorder=20,
+                    label="Interpolated sensors" if not marker_label_added else None,
+                )
+                marker_label_added = True
+
         ax.set_title(f"Forcing function", fontsize=20)
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=3))
         ax.legend(frameon=False)
         ax.set_box_aspect(1)
 
-        # plot the arrows for transformation
-        # add an arrow to the middle column
-        # and a T right above it
-        # ax = fig.add_subplot(gridspec[row, 1])
-        # ax.arrow(0, 0, 0.25, 0.0, head_width=0.1, head_length=0.1, fc='black', ec='black', lw=15)
-        # ax.text(0.1, 0.1, "T", fontsize=30)
-        # ax.set_xlim(0, 0.5)
-        # ax.set_ylim(-0.3, 0.3)
-        # ax.axis("off")
-    
         # plot the transformation. Its the same 3d mesh plot as the target
         vmin = ys[row].min().item()
         vmax = ys[row].max().item()
@@ -456,5 +474,4 @@ def plot_transformation_elastic(example_xs, example_ys, example_y_hats, xs, ys, 
         plt.savefig(plot_name)
         print("Saving to ", plot_name)
         plt.clf()
-
 
